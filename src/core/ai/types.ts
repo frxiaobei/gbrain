@@ -190,6 +190,7 @@ export type MultimodalInput =
  * supported (Voyage requires one input_type per request).
  */
 export interface EmbedMultimodalOpts {
+  signal?: AbortSignal;
   inputType?: 'document' | 'query';
 }
 
@@ -503,6 +504,12 @@ export interface AIGatewayConfig {
    * Allows brains using OpenAI for text to use Voyage for image embeddings.
    */
   embedding_multimodal_model?: string;
+  /** Optional host-local Voyage input/pacing controls; zero preserves existing behavior. */
+  embed_image_min_interval_ms?: number;
+  embed_image_max_pixels?: number;
+  embed_image_max_request_tokens?: number;
+  embed_image_batch_size?: number;
+
   /**
    * Separate model for image OCR (e.g. "openai:gpt-4o-mini"). When set,
    * generateOcrText() routes to this model instead of expansion_model.

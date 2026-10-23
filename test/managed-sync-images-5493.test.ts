@@ -32,7 +32,7 @@ import { readTreeBlobs } from '../src/core/persistence/sync-blobs.ts';
 import { sha256 } from '../src/core/persistence/digest.ts';
 import { importImageFile } from '../src/core/import-file.ts';
 import { slugifyPath } from '../src/core/sync.ts';
-import { __setEmbedTransportForTests, configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
+import { __setEmbedTransportForTests, configureGateway, resetGateway, reconfigureGatewayWithEngine } from '../src/core/ai/gateway.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -93,7 +93,7 @@ async function imagePage(engine: BrainEngine, sourceId: string, slug: string) {
 beforeAll(async () => {
   const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engines.push(lite);
   if (process.env.DATABASE_URL) {
-    const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL);
+    const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL, 'instance', 12);
     engines.push(pg.engine); closePostgres = pg.close;
   }
 }, 120_000);
@@ -298,3 +298,26 @@ describe('managed sync imports images when multimodal embedding is on (#5493 hel
       }
     }), 240_000);
 });
+
+
+test('paced mixed sync drains six images without losing deferred lane heads', async () => withEnv({ ...env, GBRAIN_SYNC_LANES: '6' }, async () => {
+  const interval = Number(process.env.GBRAIN_TEST_IMAGE_REAL_INTERVAL_MS ?? 100);
+  for (const engine of engines) {
+    const files: Record<string, string | Buffer> = { 'notes/aaa.md': NOTE };
+    for (let i = 0; i < 6; i++) files[`notes/image-${i}.png`] = PNG;
+    const { sourceId } = await managedSource(engine, files);
+    await engine.setConfig('embed.image_min_interval_ms', String(interval));
+    await reconfigureGatewayWithEngine(engine);
+    const starts: number[] = [];
+    globalThis.fetch = (async () => { starts.push(Date.now()); return new Response(JSON.stringify({ data: [{ embedding: Array(1024).fill(.1) }], usage: { total_tokens: 1 } })); }) as unknown as typeof fetch;
+    const result = await performManagedSync(engine, { sourceId, noPull: true });
+    expect(result.status).toBe('first_sync');
+    expect(starts).toHaveLength(6);
+    for (let i=1;i<starts.length;i++) expect(starts[i]!-starts[i-1]!).toBeGreaterThanOrEqual(interval-5);
+    const rows = await engine.executeRaw<{ state: string; preparation_attempts: number }>('SELECT state,preparation_attempts FROM persistence_requests WHERE source_id=$1', [sourceId]);
+    expect(rows.every(row => row.state === 'committed' && row.preparation_attempts === 0)).toBe(true);
+    expect(await heldPaths(engine, sourceId)).toEqual([]);
+    await engine.setConfig('embed.image_min_interval_ms', '0');
+    await reconfigureGatewayWithEngine(engine);
+  }
+}), 900_000);

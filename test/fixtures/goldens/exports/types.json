@@ -2742,6 +2742,10 @@
           "deepseek_api_key?: string | undefined",
           "doctor?: { default_budget_ms?: number | string; } | undefined",
           "dream?: { synthesize?: { session_corpus_dir?: string; meeting_transcripts_dir?: string; verdict_model?: string; max_prompt_tokens?: number; max_chunks_per_transcript?: number; subagent_timeout_ms?: number; subagent_wait_timeout_ms?: number; }; patterns?: { lookback_days?: number; min_evidence?: number; }; } | undefined",
+          "embed_image_batch_size?: number | undefined",
+          "embed_image_max_pixels?: number | undefined",
+          "embed_image_max_request_tokens?: number | undefined",
+          "embed_image_min_interval_ms?: number | undefined",
           "embedding_columns?: Record<string, EmbeddingColumnConfig> | undefined",
           "embedding_dimensions?: number | undefined",
           "embedding_disabled?: boolean | undefined",
@@ -3200,7 +3204,8 @@
       {
         "kind": "interface",
         "members": [
-          "inputType?: \"query\" | \"document\" | undefined"
+          "inputType?: \"query\" | \"document\" | undefined",
+          "signal?: AbortSignal | undefined"
         ],
         "name": "EmbedMultimodalOpts"
       },
@@ -4598,6 +4603,7 @@
           "noEmbed?: boolean | undefined",
           "ocrConcurrency?: number | undefined",
           "prepare?: ((prepared: Omit<PreparedContentImport, \"parsedPage\">) => Promise<ImportResult>) | undefined",
+          "signal?: AbortSignal | undefined",
           "sourceId?: string | undefined"
         ],
         "name": "ImportImageOptions"

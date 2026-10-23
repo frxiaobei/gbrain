@@ -1,3 +1,4 @@
+import { mergeImageControls } from './ai/image-controls.ts';
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, renameSync } from 'fs';
 import { isAbsolute, join } from 'path';
 import { homedir } from 'os';
@@ -306,6 +307,12 @@ export interface GBrainConfig {
   embedding_multimodal?: boolean;
   /** Model override for multimodal embeddings (e.g. "voyage:voyage-multimodal-3"). */
   embedding_multimodal_model?: string;
+  /** Optional host-local Voyage input/pacing controls; zero preserves existing behavior. */
+  embed_image_min_interval_ms?: number;
+  embed_image_max_pixels?: number;
+  embed_image_max_request_tokens?: number;
+  embed_image_batch_size?: number;
+
 
   /**
    * v0.42 (#1981) — Retrieval Reflex. The context engine's deterministic
@@ -953,7 +960,8 @@ export async function loadConfigWithEngine(
   // DB applies only when env did NOT win. Env presence is detected by the
   // sync loadConfig() already setting the field. For each flag, prefer the
   // existing fileConfig value when defined; otherwise fall through to DB.
-  const merged: GBrainConfig = { ...fileConfig };
+  const merged: GBrainConfig = await mergeImageControls(fileConfig, dbStr);
+
   if (merged.embedding_multimodal === undefined && dbMultimodal !== undefined) {
     merged.embedding_multimodal = dbMultimodal;
   }

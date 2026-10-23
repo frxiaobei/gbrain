@@ -1,3 +1,5 @@
+import { currentImageMinInterval } from '../ai/image-controls.ts';
+import { tryAdmitMultimodal } from '../ai/multimodal-throttle.ts';
 import type { BrainEngine, ReservedConnection } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import { claimableWriteSql, foregroundPrioritySql, claimGroupFollowers, claimNextLaneHead, claimNextWrite, publicationGroupKey, syncGroup, floorPreparationAttempts, hasClaimableWrite, getWriteRequestById, releaseUnpublishedClaim, renewWriteClaim, vacuumPersistenceQueues, independentGroup, sweepSegmentStorage, yieldToEventLoop } from './journal.ts';
@@ -1054,7 +1056,23 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       // member before it is still unfinished (#6153 class).
       const lane = laneOf(row);
       if (await claimedHeadOrder(this.engine, row, lane !== null) === 'wait') { await releaseUnpublishedClaim(this.statements, row, 'group_member_waiting'); return false; }
-      const group = publicationGroupKey(row);
+      const interval = currentImageMinInterval();
+      const skipImageEmbedding = row.intent?.noEmbed === true || row.intent?.embedDeferred === true || (row.intent?.processingOptions as { noEmbed?: boolean } | undefined)?.noEmbed === true;
+      const importKind = row.intent?.kind === 'managed_file_import' || row.intent?.kind === 'managed_sync_import';
+      if (interval > 0 && importKind && !skipImageEmbedding && (await import('../import-file.ts')).isImageFilePath(String(row.intent?.sourcePath ?? row.slug))) {
+        const admission = await tryAdmitMultimodal(interval, this.abort.signal);
+        if (!admission.ready) {
+          await releaseUnpublishedClaim(this.statements, row, 'provider_rate_wait', { charge: false });
+          root.retryAfterMs = admission.retryAfterMs;
+          if (row.worktree_id) this.syncHeadSeen.delete(row.worktree_id);
+          if (lane) this.laneHeadSeen.delete(lane.run);
+          return false;
+        }
+        return admission.run(() => this.execute(row, root));
+      }
+      // A Markdown head can otherwise pull an image follower into a parallel
+      // group. Keep import/sync requests single while host pacing is enabled.
+      const group = interval > 0 && (String(row.intent?.kind).startsWith('managed_sync_') || row.intent?.kind === 'managed_file_import') ? null : publicationGroupKey(row);
       // A managed import batch also groups on PGLite: its members share one transaction's guards there too.
       if (!group || this.engine.kind !== 'postgres' && !group.startsWith('import:')) return this.execute(row, root);
       // #6007: a put_pages or import batch publishes in groups of at most PAGE_BATCH_GROUP_MAX pages.

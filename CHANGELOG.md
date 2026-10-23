@@ -10,6 +10,14 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.320.2] - 2026-10-23
+
+### Private fork hotfix
+
+Image indexing can now share a host-level request interval across sync, import, and background sweeps. Queued images wait without consuming preparation attempts, while rate-limit responses stop the current sweep and report its unfinished work. Optional macOS image preparation bounds provider copies without altering original assets or reducing OCR input quality. Copy settings are recorded and changing them makes existing image vectors eligible for rebuilding.
+
+All controls remain disabled by default. Deploy the recorded private-fork artifact and configure the request interval, batch size, pixel limit, and conservative request-token bound for the account's existing quota. Existing spend limits still apply; this does not increase provider quota or authorize paid indexing.
+
 ## [0.60.320.1] - 2026-10-23
 
 ### Private fork hotfix

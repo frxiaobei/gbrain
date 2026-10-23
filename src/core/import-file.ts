@@ -1,3 +1,5 @@
+import { currentImageMaxPixels } from './ai/image-controls.ts';
+import { prepareMultimodalImage, imageVariantSignature, type ImageVariant } from './ai/multimodal-input.ts';
 import { assertUnmanagedCanonicalWriter } from './persistence/maintenance.ts';
 import { suffixedFrontmatterSlugHold } from './persistence/suffixed-slug.ts';
 import { maintenanceBeliefTransaction } from './belief/writers.ts';
@@ -1819,6 +1821,7 @@ async function maybeOcrGated(
 }
 
 export interface ImportImageOptions {
+  signal?: AbortSignal;
   prepare?: (prepared: Omit<import('./persistence/prepared-import.ts').PreparedContentImport, 'parsedPage'>) => Promise<ImportResult>;
   bytes?: Buffer;
   /** Override default OCR concurrency for tests. */
@@ -1849,6 +1852,7 @@ export async function importImageFile(
   opts: ImportImageOptions = {},
 ): Promise<ImportResult> {
   if (!opts.prepare) await assertUnmanagedCanonicalWriter(engine, 'direct file import');
+  const ocrWanted = !opts.noEmbed && process.env.GBRAIN_EMBEDDING_IMAGE_OCR === 'true';
   // Defense-in-depth: reject symlinks before reading bytes.
   const lstat = lstatSync(filePath);
   if (lstat.isSymbolicLink()) {
@@ -1896,9 +1900,9 @@ export async function importImageFile(
       `SELECT EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id = p.id AND c.embedding_image IS NOT NULL) AS has_visual
          FROM pages p WHERE p.source_id = $1 AND p.slug = $2 AND ${safeChunksFilter('p')}`,
       [sourceOpts.sourceId, imageSlug]);
-    const ocrWanted = !opts.noEmbed && process.env.GBRAIN_EMBEDDING_IMAGE_OCR === 'true';
     const ocrDone = (existing.frontmatter as Record<string, unknown>)?.ocr_status === 'done' || existing.compiled_truth.trim() !== '';
-    const indexComplete = !!sealed[0] && (opts.noEmbed || sealed[0].has_visual) && (!ocrWanted || ocrDone);
+    const variantMatches = opts.noEmbed || ((existing.frontmatter as { image_embedding_variant?: { signature?: string } })?.image_embedding_variant?.signature ?? null) === imageVariantSignature(currentImageMaxPixels());
+    const indexComplete = variantMatches && !!sealed[0] && (opts.noEmbed || sealed[0].has_visual) && (!ocrWanted || ocrDone);
     if (indexComplete && !existing.deleted_at && existing.text_projection_revision === existing.knowledge_revision) {
       if (opts.prepare) return opts.prepare({ slug: imageSlug, observedRevision: existing.knowledge_revision ?? null, noop: true,
         result: { slug: imageSlug, status: 'skipped', chunks: 0 }, validate: async () => {}, apply: async () => {} });
@@ -1911,8 +1915,14 @@ export async function importImageFile(
 
   // Decode HEIC/AVIF; pass-through for universal codecs.
   let decoded: { buf: Buffer; mime: string };
+  let imageVariant: ImageVariant | undefined;
   try {
-    decoded = await decodeIfNeeded(ext, buf);
+    const maxPixels = opts.noEmbed ? 0 : currentImageMaxPixels();
+    if (maxPixels > 0) {
+      const prepared = await prepareMultimodalImage(buf, ext === '.gif' ? 'image/gif' : 'application/octet-stream', maxPixels, opts.signal);
+      decoded = { buf: prepared.bytes, mime: prepared.mime };
+      imageVariant = prepared.variant;
+    } else decoded = await decodeIfNeeded(ext, buf);
   } catch (err) {
     return {
       slug: imageSlug,
@@ -1927,9 +1937,10 @@ export async function importImageFile(
 
   // OCR opt-in (cherry-1). Runs through the per-process limiter so 100
   // images first-import doesn't serialize into 200s of OCR latency.
+  const ocrInput = !opts.noEmbed && ocrWanted && imageVariant ? await decodeIfNeeded(ext, buf) : decoded;
   const ocr = opts.noEmbed
     ? { text: '', successful: false }
-    : await _ocrLimiter(() => maybeOcr(engine, decoded.buf, decoded.mime));
+    : await _ocrLimiter(() => maybeOcr(engine, ocrInput.buf, ocrInput.mime));
   if ((hadProtectedOcr || (existing?.content_hash === hash && await provenanceDistrusted(engine, existing.id))) && !ocr.successful) {
     return { slug: imageSlug, status: 'skipped', chunks: 0,
       error: OCR_REQUIRED_ERROR };
@@ -1944,7 +1955,7 @@ export async function importImageFile(
     try {
       const [vec] = await embedMultimodal([
         { kind: 'image_base64', data: decoded.buf.toString('base64'), mime: decoded.mime },
-      ]);
+      ], { signal: opts.signal });
       embedding = vec;
     } catch (err) {
       return {
@@ -1956,10 +1967,13 @@ export async function importImageFile(
     }
   }
 
+  const sourceMime = ({ '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif', '.heic': 'image/heic', '.heif': 'image/heif', '.avif': 'image/avif' } as Record<string,string>)[ext] ?? decoded.mime;
+  const assetMime = imageVariant ? sourceMime : decoded.mime;
   const filename = basename(relativePath);
   const frontmatter: Record<string, unknown> = {
-    mime_type: decoded.mime,
+    mime_type: assetMime,
     bytes: buf.byteLength,
+    ...(imageVariant ? { image_embedding_variant: imageVariant } : {}),
     ...exif,
     ...(ocr.successful ? { ocr_status: 'done' } : {}),
   };
@@ -1978,7 +1992,7 @@ export async function importImageFile(
   const fileSpec: FileSpec = {
     filename,
     storage_path: relativePath.replace(/[\\\/]/g, '/'),
-    mime_type: decoded.mime,
+    mime_type: assetMime,
     size_bytes: buf.byteLength,
     content_hash: hash,
   };

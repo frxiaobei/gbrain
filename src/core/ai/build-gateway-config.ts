@@ -83,6 +83,11 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
     embedding_identity_unverified: !c.embedding_model?.trim(),
     embedding_dimensions: c.embedding_dimensions,
     embedding_multimodal_model: c.embedding_multimodal_model,
+    embed_image_min_interval_ms: c.embed_image_min_interval_ms,
+    embed_image_max_pixels: c.embed_image_max_pixels,
+    embed_image_max_request_tokens: c.embed_image_max_request_tokens,
+    embed_image_batch_size: c.embed_image_batch_size,
+
     embedding_image_ocr_model: c.embedding_image_ocr_model,
     expansion_model: c.expansion_model,
     chat_model: c.chat_model,

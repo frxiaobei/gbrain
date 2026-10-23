@@ -83,7 +83,7 @@ export async function prepareManagedSyncImage(engine: BrainEngine, row: WriteReq
     `${p.path} is no longer in the working tree of ${row.source_id}, so nothing was imported from it; commit the removal or restore the file, then sync again.`);
   let prepared: Omit<PreparedContentImport, 'parsedPage'> | undefined;
   enterClaimStep(ctx.clock, 'image_import', undefined, 'db');
-  const result = await importImageFile(engine, filePath, p.sourcePath, { sourceId: row.source_id, noEmbed: ctx.noEmbed, bytes,
+  const result = await importImageFile(engine, filePath, p.sourcePath, { sourceId: row.source_id, noEmbed: ctx.noEmbed, bytes, signal: ctx.clock?.signal,
     prepare: async value => { prepared = value; return value.result; } });
   if (!prepared || prepared.slug !== row.slug) throw refuse('invalid_params', result.error ?? 'The image could not be prepared.',
     `${p.sourcePath} could not be prepared as page ${row.slug}${result.error ? ` (${result.error})` : ''}; fix the file, then sync again.`);

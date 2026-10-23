@@ -558,3 +558,47 @@ high-ceiling retrieval re-run with `expansion=true` (one LLM multi-query call)
 per weak-graded query and IS reachable by remote MCP callers once the operator
 enables it — attacker-shaped weak queries drive that spend. Both respect
 `spend.posture`; leave them off unless you accept per-weak-query LLM cost.
+
+### Optional host-local Voyage image controls
+
+These DB runtime keys default to `0`, preserving the existing provider behavior.
+For a low-quota account, an operator can explicitly configure:
+
+```bash
+gbrain config set embed.image_min_interval_ms 61000
+gbrain config set embed.image_batch_size 1
+gbrain config set embed.image_max_pixels 4000000
+gbrain config set embed.image_max_request_tokens 9000
+```
+
+The interval gates every actual Voyage multimodal HTTP request, including image
+sync/import, CLI stale sweeps, queued work and multimodal text queries. Processes
+sharing one host and one `GBRAIN_HOME`/config directory share an OS lock and a
+persistent permit. A request waits at least the interval after the previous one
+finishes. A killed process retains its HTTP timeout plus interval reservation.
+Corrupt state, a backwards clock or unavailable locking fails closed. Different
+configuration directories or other hosts/accounts are not globally coordinated.
+These settings do not increase a provider quota or alter the approved spend cap.
+
+Positive `image_max_pixels` explicitly enables macOS `/usr/bin/sips` preprocessing;
+other hosts refuse it rather than sending an unbounded original. A private
+0700 temporary directory and 0600 files hold an aspect-preserving PNG copy, with
+30-second subprocess limits and cancellation. Source bytes are untouched.
+Inputs over 20 MiB or 100 million pixels and GIFs (whose animation cannot be
+preserved by this encoder) are refused. Original asset MIME and OCR input remain
+unchanged. Image frontmatter records the variant signature, dimensions and both
+hashes; changing the variant makes existing image vectors stale. The source file,
+content hash and recorded source path always describe the original asset.
+
+Each request checks one total bound: `ceil(output pixels / 560)` plus UTF-8 text
+bytes plus 256 framing tokens. It rejects excess input without truncating text.
+With one input, 4 million pixels and a 61-second interval this provides a
+conservative envelope for a 10K-token/minute account, but provider-reported usage
+and actual 429 responses remain authoritative. Other credentials consumers are
+outside the lock's scope. No token usage or cost counter is reset.
+
+A Voyage HTTP 429 records one failed image and stops that sweep, reporting
+`rate_limited: true` and the unattempted `deferred` count. No managed request is
+silently retried. Owner claim cancellation reaches image preparation, permit
+waiting and fetch; cancelling a client does not erase an already-admitted durable
+request. Dry runs do not preprocess images, wait or call the provider.

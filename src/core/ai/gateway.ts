@@ -1,3 +1,6 @@
+import { registerImageControlReader } from './image-controls.ts';
+import { withMultimodalPermit } from './multimodal-throttle.ts';
+import { prepareMultimodalBatch, multimodalRequestBody, multimodalRequestLimits } from './multimodal-input.ts';
 /**
  * AI Gateway — unified seam for every AI call gbrain makes.
  *
@@ -137,6 +140,7 @@ const DEFAULT_CHAT_MODEL = 'anthropic:claude-sonnet-4-6';
 // the mode bundles) — `voyage:rerank-3-lite` (was `voyage:rerank-2.5` from v0.48.2).
 
 let _config: AIGatewayConfig | null = null;
+registerImageControlReader(() => _config);
 /** #5137: provider auth errors echo keys; scrub every key in effect before the text leaves the gateway. */
 const redactKeys = (text: string): string => redactProviderKeys(text, _config?.env ?? {});
 const _modelCache = new Map<string, any>();
@@ -466,6 +470,11 @@ export function configureGateway(config: AIGatewayConfig): void {
     // one).
     embedding_dimensions: config.embedding_dimensions,
     embedding_multimodal_model: config.embedding_multimodal_model,
+    embed_image_min_interval_ms: config.embed_image_min_interval_ms,
+    embed_image_max_pixels: config.embed_image_max_pixels,
+    embed_image_max_request_tokens: config.embed_image_max_request_tokens,
+    embed_image_batch_size: config.embed_image_batch_size,
+
     embedding_image_ocr_model: config.embedding_image_ocr_model,
     expansion_model: config.expansion_model ?? DEFAULT_EXPANSION_MODEL,
     chat_model: config.chat_model ?? DEFAULT_CHAT_MODEL,
@@ -626,7 +635,12 @@ async function resolveGatewayModels(engine: BrainEngine): Promise<AIGatewayConfi
   const expansionFull = newExpansion.includes(':') ? newExpansion : prefixWithProviderFrom(cfg.expansion_model ?? DEFAULT_EXPANSION_MODEL, newExpansion);
   const chatFull = newChat.includes(':') ? newChat : prefixWithProviderFrom(cfg.chat_model ?? DEFAULT_CHAT_MODEL, newChat);
 
-  _config = { ...cfg, expansion_model: expansionFull, chat_model: chatFull };
+  const imageControls: Partial<AIGatewayConfig> = {};
+  for (const name of ['image_min_interval_ms', 'image_max_pixels', 'image_max_request_tokens', 'image_batch_size'] as const) {
+    const raw = await reader?.getConfig(`embed.${name}`);
+    if (raw != null) imageControls[`embed_${name}`] = Number(raw);
+  }
+  _config = { ...cfg, ...imageControls, expansion_model: expansionFull, chat_model: chatFull };
   setGatewayModelSource('expansion', expansionFull, dbExpansion ? { source: 'config_key', origin: 'expansion_model' } : gatewayModelSource('expansion', expansionDetailed, expansionEffective));
   setGatewayModelSource('chat', chatFull, dbChat ? { source: 'config_key', origin: 'chat_model' } : gatewayModelSource('chat', chatDetailed, chatEffective));
   _modelCache.clear();
@@ -1886,6 +1900,7 @@ const MULTIMODAL_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
  *
  * Empty input → returns []. Preserves the `embed([])` contract.
  */
+
 export async function embedMultimodal(
   inputs: MultimodalInput[],
   opts: EmbedMultimodalOpts = {},
@@ -1903,14 +1918,14 @@ export async function embedMultimodal(
   const charsPerToken = Math.max(recipe.touchpoints.embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN, 1);
   const estimatedInputTokens = inputs.reduce((n, input) => n + (input.kind === 'text' ? Math.ceil(input.text.length / charsPerToken) : MULTIMODAL_IMAGE_TOKEN_CEILING), 0);
   const reservation = tracker.reserve({ modelId: mmModelId, estimatedInputTokens, maxOutputTokens: 0, kind: 'embed', label: 'gateway.multimodal' });
-  const usage: { tokens: number | null } = { tokens: 0 };
+  const usage: { tokens: number | null; sent?: number } = { tokens: 0, sent: 0 };
   try {
     const out = await embedMultimodalUnmetered(inputs, opts, usage);
     recordOnTracker(tracker, { modelId: mmModelId, reservation, requestedModelId: modelStr, kind: 'embed', label: 'gateway.multimodal',
       inputTokens: usage.tokens || estimatedInputTokens, outputTokens: 0, estimated: !usage.tokens });
     return out;
   } catch (err) {
-    if (err instanceof AIConfigError) tracker.release(reservation);
+    if ((usage.sent ?? 0) === 0) tracker.release(reservation);
     else recordOnTracker(tracker, { modelId: mmModelId, reservation, requestedModelId: modelStr, kind: 'embed', label: 'gateway.multimodal.failed',
       inputTokens: estimatedInputTokens, outputTokens: 0, failed: true, estimated: true });
     throw err;
@@ -1920,7 +1935,7 @@ export async function embedMultimodal(
 async function embedMultimodalUnmetered(
   inputs: MultimodalInput[],
   opts: EmbedMultimodalOpts,
-  usage: { tokens: number | null } = { tokens: null },
+  usage: { tokens: number | null; sent?: number } = { tokens: null, sent: 0 },
 ): Promise<Float32Array[]> {
 
   const cfg = requireConfig();
@@ -1956,7 +1971,7 @@ async function embedMultimodalUnmetered(
   // path, so we still branch on recipe.id for that one.
   if (recipe.id !== 'voyage' && recipe.implementation === 'openai-compatible') {
     usage.tokens = null;
-    return embedMultimodalOpenAICompat(inputs, recipe, parsed.modelId, cfg, opts);
+    return embedMultimodalOpenAICompat(inputs, recipe, parsed.modelId, cfg, opts, usage);
   }
   if (recipe.id !== 'voyage') {
     throw new AIConfigError(
@@ -1996,28 +2011,18 @@ async function embedMultimodalUnmetered(
   // Batch in groups of 32 (Voyage's published max). Each batch is one HTTP
   // call; results concatenate in input order.
   const allEmbeddings: Float32Array[] = [];
-  for (let i = 0; i < inputs.length; i += MULTIMODAL_BATCH_SIZE) {
-    const batch = inputs.slice(i, i + MULTIMODAL_BATCH_SIZE);
-    const body = {
-      inputs: batch.map(input => ({
-        // Voyage's documented content shape supports both image and text
-        // entries. v0.36 cross-modal: text variant for query embedding.
-        content: [
-          input.kind === 'text'
-            ? { type: 'text', text: input.text }
-            : {
-              type: 'image_base64',
-              image_base64: `data:${input.mime};base64,${input.data}`,
-            },
-        ],
-      })),
-      model: parsed.modelId,
-      input_type: inputType,
-    };
+  const { batchSize, tokenCap } = multimodalRequestLimits(cfg);
+  for (let i = 0; i < inputs.length; i += batchSize) {
+    opts.signal?.throwIfAborted();
+    const batch = await prepareMultimodalBatch(inputs.slice(i, i + batchSize), cfg, tokenCap, opts.signal);
+    const body = multimodalRequestBody(batch, parsed.modelId, inputType);
 
     let res: Response;
     try {
-      res = await invokeAI({ operation: 'gateway.multimodal', kind: 'multimodal', model: `${recipe.id}:${parsed.modelId}` }, () => fetch(`${baseUrl}/multimodalembeddings`, {
+      res = await withMultimodalPermit(cfg.embed_image_min_interval_ms ?? 0, AI_MULTIMODAL_TIMEOUT_MS, opts.signal, () => invokeAI({ operation: 'gateway.multimodal', kind: 'multimodal', model: `${recipe.id}:${parsed.modelId}` }, () => {
+        opts.signal?.throwIfAborted();
+        usage.sent = (usage.sent ?? 0) + 1;
+        return fetch(`${baseUrl}/multimodalembeddings`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -2026,8 +2031,8 @@ async function embedMultimodalUnmetered(
         body: JSON.stringify(body),
         // v0.42.20.0 (codex #4) — per-request multimodal timeout (direct fetch
         // bypasses the SDK abortSignal).
-        signal: AbortSignal.timeout(AI_MULTIMODAL_TIMEOUT_MS),
-      }), responseInvocationUsage);
+        signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(AI_MULTIMODAL_TIMEOUT_MS)]) : AbortSignal.timeout(AI_MULTIMODAL_TIMEOUT_MS),
+      }); }, responseInvocationUsage));
     } catch (err) {
       if (isAIInvocationPolicyError(err)) throw err;
       throw normalizeAIError(err, `embedMultimodal(${recipe.id}:${parsed.modelId})`, redactKeys);
@@ -2108,6 +2113,7 @@ async function embedMultimodalOpenAICompat(
   modelId: string,
   cfg: AIGatewayConfig,
   opts: EmbedMultimodalOpts = {},
+  usage: { tokens: number | null; sent?: number } = { tokens: null, sent: 0 },
 ): Promise<Float32Array[]> {
   // Auth resolution via the gateway's canonical helper so LiteLLM-style
   // optional-auth recipes (Authorization: Bearer LITELLM_API_KEY) and
@@ -2167,7 +2173,7 @@ async function embedMultimodalOpenAICompat(
 
     let res: Response;
     try {
-      res = await invokeAI({ operation: 'gateway.multimodal', kind: 'multimodal', model: `${recipe.id}:${modelId}` }, () => fetch(`${baseUrl}/embeddings`, {
+      res = await invokeAI({ operation: 'gateway.multimodal', kind: 'multimodal', model: `${recipe.id}:${modelId}` }, () => { opts.signal?.throwIfAborted(); usage.sent = (usage.sent ?? 0) + 1; return fetch(`${baseUrl}/embeddings`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -2175,8 +2181,8 @@ async function embedMultimodalOpenAICompat(
         },
         body: JSON.stringify(body),
         // v0.42.20.0 (codex #4) — per-request multimodal timeout (direct fetch).
-        signal: AbortSignal.timeout(AI_MULTIMODAL_TIMEOUT_MS),
-      }), responseInvocationUsage);
+        signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(AI_MULTIMODAL_TIMEOUT_MS)]) : AbortSignal.timeout(AI_MULTIMODAL_TIMEOUT_MS),
+      }); }, responseInvocationUsage);
     } catch (err) {
       if (isAIInvocationPolicyError(err)) throw err;
       throw normalizeAIError(err, `embedMultimodal(${recipe.id}:${modelId})`, redactKeys);

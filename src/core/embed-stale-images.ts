@@ -1,3 +1,5 @@
+import { currentImageMaxPixels } from './ai/image-controls.ts';
+import { imageVariantSignature } from './ai/multimodal-input.ts';
 /**
  * `gbrain embed --stale --images`: rebuild image pages whose index is
  * incomplete (no visual vector, missing OCR text while OCR is enabled, or an
@@ -62,6 +64,9 @@ export interface StaleImageSweepResult extends EmbedCostStopFields {
   /** Candidates whose `pages.source_path` was NULL; the sweep located them by slug and the import recorded the path. */
   missingSourcePath: number;
   failures: number;
+  /** Candidates not attempted because the sweep stopped early. */
+  deferred: number;
+  rate_limited: boolean;
   failure_samples: string[];
   /** Up to 5 `source:slug: no file at <path tried>` lines for the candidates without a source file. */
   missing_samples: string[];
@@ -74,13 +79,18 @@ export async function embedStaleImages(
   opts: { sourceId?: string; dryRun: boolean; costCap?: EmbedCostCap | null },
 ): Promise<StaleImageSweepResult> {
   const ocrWanted = process.env.GBRAIN_EMBEDDING_IMAGE_OCR === 'true';
+  const pixels = currentImageMaxPixels();
+  if (!Number.isSafeInteger(pixels) || pixels < 0 || pixels > 16_000_000) throw new Error('embed.image_max_pixels must be an integer from 0 to 16000000');
   const params: unknown[] = [ocrWanted];
   if (opts.sourceId) params.push(opts.sourceId);
+  params.push(imageVariantSignature(pixels));
+  const variantParam = `$${params.length}`;
   // #6803: an unsealed image is a candidate only in the reimport class; a sealed one keeps its two incompleteness arms.
   const scope = `FROM pages p JOIN sources s ON s.id = p.source_id CROSS JOIN LATERAL (SELECT ${projectionClassSql('p', 's')} AS cls) k
       WHERE p.page_kind = 'image' AND p.deleted_at IS NULL${opts.sourceId ? ' AND p.source_id = $2' : ''}`;
   const unsealed = 'p.text_projection_revision IS DISTINCT FROM p.knowledge_revision';
-  const incompleteSealed = `(NOT (${safeChunksFilter('p')})
+  const incompleteSealed = `(p.frontmatter->'image_embedding_variant'->>'signature' IS DISTINCT FROM ${variantParam}
+          OR NOT (${safeChunksFilter('p')})
           OR NOT EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id = p.id AND c.embedding_image IS NOT NULL)
           OR ($1 AND COALESCE(p.frontmatter->>'ocr_status', '') <> 'done' AND btrim(p.compiled_truth) = ''))`;
   const rows = await engine.executeRaw<{ slug: string; source_id: string; source_path: string | null; local_path: string | null }>(
@@ -95,7 +105,7 @@ export async function embedStaleImages(
         COUNT(*) FILTER (WHERE ${unsealed} AND k.cls = 'protected')::int AS protected,
         COUNT(*) FILTER (WHERE ${unsealed} AND k.cls = 'archived')::int AS archived ${scope}`, params);
   const result: StaleImageSweepResult = { candidates: rows.length, rebuilt: 0, skipped: 0, missingFile: 0, missingSourcePath: rows.filter(row => row.source_path === null).length,
-    failures: 0, failure_samples: [], missing_samples: [], reimport: Number(counts?.reimport ?? 0), incomplete_sealed: Number(counts?.incomplete_sealed ?? 0),
+    failures: 0, deferred: 0, rate_limited: false, failure_samples: [], missing_samples: [], reimport: Number(counts?.reimport ?? 0), incomplete_sealed: Number(counts?.incomplete_sealed ?? 0),
     ocr_required: Number(counts?.ocr_required ?? 0), sealable: Number(counts?.sealable ?? 0), protected: Number(counts?.protected ?? 0), archived: Number(counts?.archived ?? 0) };
   const fail = (row: { source_id: string; slug: string }, error: string) => {
     result.failures++;
@@ -108,9 +118,11 @@ export async function embedStaleImages(
   const gitRoots = new Map<string, string | null>();
   const listings: DirectoryListings = new Map();
   const cap = opts.costCap;
-  for (const row of rows) {
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index]!;
+    const defer = () => { result.deferred = rows.length - index; };
     // Fix wave 13 P1.18: the approved cap stops the sweep before the next image; a refused image is not a failure.
-    if (cap?.hit()) break;
+    if (cap?.hit()) { defer(); break; }
     const root = row.local_path ?? (row.source_id === 'default' ? repoPath : null);
     // An image slug is the lower-cased repo-relative path, so it names the file when the importer never recorded source_path.
     const located = root ? locateSourceFile(root, [row.source_path, row.slug], gitRoots, listings) : null;
@@ -126,17 +138,31 @@ export async function embedStaleImages(
     // A managed brain imports through the source's owner (the coordinated importer, as `gbrain import` does); the legacy writer refuses it.
     // The owner reads only files inside the source root: a subpath-scoped page found under the git root is reported, not copied in.
     if (managed && located.viaGitRoot) { fail(row, `${file} is outside source ${row.source_id}'s root ${root}; a managed brain imports only files inside the source root`); continue; }
+    if (cap?.hit()) { defer(); break; }
     try {
-      const run = () => managed ? importManagedFile(engine, file, sourcePath, { sourceId: row.source_id }) : importImageFile(engine, file, sourcePath, { sourceId: row.source_id });
+      const run = () => managed ? importManagedFile(engine, file, sourcePath, { sourceId: row.source_id, signal: cap?.signal }) : importImageFile(engine, file, sourcePath, { sourceId: row.source_id, signal: cap?.signal });
       const imported = cap ? await cap.metered(run) : await run();
       if (imported.status === 'imported') result.rebuilt++;
-      else if (cap?.hit()) break;
-      else if (imported.status === 'error') fail(row, imported.error ?? 'import failed');
+      else if (cap?.hit()) { defer(); break; }
+      else if (imported.status === 'error') {
+        fail(row, imported.error ?? 'import failed');
+        if (/Voyage multimodal returned 429:/.test(imported.error ?? '')) {
+          result.rate_limited = true;
+          result.deferred = rows.length - index - 1;
+          break;
+        }
+      }
       else if (imported.error === OCR_REQUIRED_ERROR) result.ocr_required++;
       else result.skipped++;
     } catch (e) {
-      if (cap?.hit()) break;
-      fail(row, e instanceof Error ? e.message : String(e));
+      if (cap?.hit()) { defer(); break; }
+      const message = e instanceof Error ? e.message : String(e);
+      fail(row, message);
+      if (/Voyage multimodal returned 429:/.test(message)) {
+        result.rate_limited = true;
+        result.deferred = rows.length - index - 1;
+        break;
+      }
     }
   }
   return result;
@@ -170,7 +196,7 @@ export function foldImageSweep<T extends { failures: number; failure_samples: st
   if (sweep.missingFile > 0) serr(`[embed] images: ${sweep.missingFile} image page(s) have no source file in the checkout and were not rebuilt (first: ${sweep.missing_samples[0]}); delete those pages or restore the files.`);
   if (sweep.failures > 0) {
     result.failures += sweep.failures;
-    result.failure_samples.push(`${sweep.failures} image page(s) could not be rebuilt by the image sweep (${sweep.failure_samples.slice(0, 3).join('; ')}); every other stale image was rebuilt first.`);
+    result.failure_samples.push(`${sweep.failures} image page(s) could not be rebuilt by the image sweep (${sweep.failure_samples.slice(0, 3).join('; ')}); ${sweep.rebuilt} rebuilt, ${sweep.skipped} unchanged, ${sweep.deferred} deferred.`);
   }
   return result;
 }
@@ -193,7 +219,7 @@ export async function runEmbedStaleImagesCli(engine: BrainEngine, args: string[]
   if (args.includes('--json')) console.log(JSON.stringify(result));
   else {
     console.log(`[embed] images: ${result.candidates} incomplete (${result.reimport} to reimport, ${result.incomplete_sealed} sealed but incomplete)${result.missingSourcePath ? ` (${result.missingSourcePath} with no recorded source_path, located by slug)` : ''}, ${dryRun ? '(dry run) nothing rebuilt'
-      : `${result.rebuilt} rebuilt, ${result.skipped} unchanged, ${result.ocr_required} need OCR, ${result.missingFile} missing source file, ${result.failures} failed`}`);
+      : `${result.rebuilt} rebuilt, ${result.skipped} unchanged, ${result.ocr_required} need OCR, ${result.missingFile} missing source file, ${result.failures} failed, ${result.deferred} deferred${result.rate_limited ? ' (provider rate limit; stopped)' : ''}`}`);
     console.log(`[embed] images: ${result.ocr_required} ${dryRun ? 'would be refused until OCR is enabled' : 'refused for lack of a successful fresh OCR pass'} (ocr_required; GBRAIN_EMBEDDING_IMAGE_OCR=true), `
       + `${result.sealable} sealable (not candidates: gbrain projections drain seals them keyless), ${result.protected} protected and ${result.archived} archived (not candidates, by design)`);
   }

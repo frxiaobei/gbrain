@@ -193,7 +193,7 @@ export async function assertImportPaths(engine: BrainEngine, sourceId: string, r
  * and prepared again in full by its publication.
  */
 export async function prepareManagedImportMutation(engine: BrainEngine, row: WriteRequest, _config: GBrainConfig,
-  screen?: { snapshot: PageSnapshot | null }): Promise<PreparedMutation> {
+  screen?: { snapshot: PageSnapshot | null }, signal?: AbortSignal): Promise<PreparedMutation> {
   const p = row.intent as ManagedImportIntent | null;
   if (row.authority.remote || row.principal_kind !== 'local_cli') throw trustedCliRequired('Filesystem import requires a trusted local CLI writer.');
   const bodyRef = p?.body_ref;
@@ -248,7 +248,7 @@ export async function prepareManagedImportMutation(engine: BrainEngine, row: Wri
   const image = isImageFilePath(p.sourcePath);
   const imageBytes = image ? Buffer.from(content, 'base64') : undefined;
   const result = image
-    ? await importImageFile(engine, p.inputPath, p.sourcePath, { ...source, noEmbed: p.noEmbed, bytes: imageBytes, prepare })
+    ? await importImageFile(engine, p.inputPath, p.sourcePath, { ...source, noEmbed: p.noEmbed, bytes: imageBytes, signal, prepare })
     : code
     ? await importCodeFile(engine, p.sourcePath, content, { ...source, noEmbed: true, prepare })
     : await importFromContent(engine, row.slug, content, { ...source, noEmbed: true, remote: false, preserveGateMarkers: true, prepare, fences: 'coordinated', writeGate: await ownerGateInput(engine, row, parseMarkdown(content, row.slug).frontmatter, p.sourcePath),

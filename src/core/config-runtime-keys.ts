@@ -6,6 +6,10 @@
  * recorded as internal state.
  */
 export const RUNTIME_READER_CONFIG_KEYS: readonly string[] = [
+  'embed.image_min_interval_ms', // gateway multimodal provider controls, default 0
+  'embed.image_max_pixels', // gateway multimodal provider controls, default 0
+  'embed.image_max_request_tokens', // gateway multimodal provider controls, default 0
+  'embed.image_batch_size', // gateway multimodal provider controls, default 0
   'embed.max_usd_per_page', // page-embedding-budget.ts: large-page embedding cap, default $2 (unlimited under spend.posture tokenmax)
   'facts.absorb_warn_threshold', // doctor facts_extraction_health absorb-refusal warn threshold, default 10 per 24 h
   'think.trajectory_enabled', // think/index.ts: trajectory substrate on temporal intents, default on

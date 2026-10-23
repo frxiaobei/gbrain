@@ -105,6 +105,25 @@ afterAll(async () => {
 });
 
 describe('#6529 embed --stale --images on a managed brain', () => {
+  test('managed Voyage 429 records one failure and defers the remaining images without retrying', async () =>
+    withEnv(env, async () => {
+      for (const engine of engines) {
+        const { sourceId } = await managedSource(engine, { 'notes/one.png': PNG, 'notes/two.png': PNG, 'notes/three.png': PNG }, ['notes/one.png', 'notes/two.png', 'notes/three.png']);
+        await engine.setConfig('embed.image_min_interval_ms', '0');
+        providerCalls = 0;
+        globalThis.fetch = (async () => { providerCalls++; return new Response('provider limited', { status: 429 }); }) as unknown as typeof fetch;
+        const swept = await embedStaleImages(engine, { sourceId, dryRun: false });
+        expect(swept).toMatchObject({ candidates: 3, rebuilt: 0, failures: 1, deferred: 2, rate_limited: true });
+        expect(providerCalls).toBe(1);
+        const receipts = await engine.executeRaw<{ state: string; intent: unknown }>('SELECT state,intent FROM persistence_requests WHERE source_id=$1 ORDER BY sequence', [sourceId]);
+        expect(receipts).toHaveLength(1);
+        expect(receipts[0]?.state).toBe('failed');
+        for (const slug of ['notes/one.png', 'notes/two.png', 'notes/three.png']) expect(await imagePage(engine, sourceId, slug)).toMatchObject({ has_vector: false });
+        expect((await embedStaleImages(engine, { sourceId, dryRun: true })).candidates).toBe(3);
+        expect(await engine.executeRaw('SELECT state,intent FROM persistence_requests WHERE source_id=$1 ORDER BY sequence', [sourceId])).toEqual(receipts);
+      }
+    }), 240_000);
+
   test('rebuilds a vectorless image through the coordinator, finds a NULL source_path page through its slug and records source_path', async () =>
     withEnv(env, async () => {
       for (const engine of engines) {
