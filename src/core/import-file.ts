@@ -37,7 +37,7 @@ import { embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
 // precedent as embed-stale.ts.
 import { embedBatchKeepingUsable, embedBatchWithBackoff } from './embed-retry.ts';
 import { isEmbeddingZeroNormError, type EmbeddingZeroNormError } from './ai/embedding-guard.ts';
-import { slugifyPath, slugifyCodePath, isCodeFilePath, hasMalformedPathSegment } from './sync.ts';
+import { slugifyPath, slugifyCodePath, slugifyImagePath, isCodeFilePath, hasMalformedPathSegment } from './sync.ts';
 import { addCodeReferenceLinks } from './engine-sql/links.ts';
 import type { ChunkInput, Page, PageInput, PageType } from './types.ts';
 import type { PageSnapshot } from './page-state/types.ts';
@@ -1865,11 +1865,7 @@ export async function importImageFile(
   }
 
   const ext = extname(relativePath).toLowerCase();
-  const slug = slugifyPath(relativePath); // strips .md/.mdx; for images ext stays in path
-  // Image slug includes the extension (otherwise foo.png and foo.jpg collide
-  // and slugifyPath would already preserve it). Recompute with the file
-  // extension preserved so the page slug is stable + collision-free.
-  const imageSlug = relativePath.replace(/[\\\/]/g, '/').toLowerCase();
+  const imageSlug = slugifyImagePath(relativePath);
   // Scoped to the exact (source_id, slug) row the write targets — same
   // unscoped-check/scoped-write fix as importFromContent/importCodeFile
   // above (the variable-bound ternary shape evaded the CI guard's inline

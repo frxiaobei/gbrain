@@ -10,6 +10,14 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.320.1] - 2026-10-23
+
+### Private fork hotfix
+
+Managed image sync now uses the same path identity as image import: normalized separators and lowercase paths while preserving punctuation, spaces, Unicode, and image extensions. Images such as `Photo+A.jpg` and `PhotoA.jpg` remain distinct, and first sync, incremental sync, rename, and deletion agree with persisted image identities. Existing image records keep their identity; this does not bulk-migrate historical metadata.
+
+To take advantage of v0.60.320.1, deploy the reviewed private-fork artifact from its recorded commit and checksum, then rerun the held managed sync. No schema migration or source-image changes are required.
+
 ## [0.60.320.0] - 2026-10-19
 
 **A managed `gbrain sync` of an ordinary (non-company) source now compares the files at HEAD with what the brain holds, instead of replaying commits, so a reset, a revert, a rewritten history or a lost run can no longer leave pages behind, and one bad file holds only itself.** Each pass reads the committed tree, the index and the database, admits only the files whose page differs, proves nothing moved underneath it, and records the checkpoint inside the last import's own transaction. An idle sync with nothing new returns in well under a second.

@@ -100,6 +100,13 @@ describe('Layer 2 — isCodeFilePath widening', () => {
 });
 
 describe('Layer 2 — resolveSlugForPath dispatches by extension (SP-5)', () => {
+  test('image identities preserve punctuation, Unicode and extensions instead of Markdown slug folding', () => {
+    expect(resolveSlugForPath('notes/Photo+A.PNG')).toBe('notes/photo+a.png');
+    expect(resolveSlugForPath('notes/Café Photo (A).jpg')).toBe('notes/café photo (a).jpg');
+    expect(resolveSlugForPath('notes/Photo+A.png')).not.toBe(resolveSlugForPath('notes/PhotoA.png'));
+    expect(resolveSlugForPath('notes\\Photo+A.png', 'My-Repo')).toBe('my-repo/notes/photo+a.png');
+  });
+
   test('markdown path → markdown-style slug (slugifyPath)', () => {
     expect(resolveSlugForPath('people/alice-smith.md'))
       .toBe(slugifyPath('people/alice-smith.md').toLowerCase());

@@ -18,7 +18,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -31,6 +31,7 @@ import { managedImageHold } from '../src/core/persistence/sync-screen.ts';
 import { readTreeBlobs } from '../src/core/persistence/sync-blobs.ts';
 import { sha256 } from '../src/core/persistence/digest.ts';
 import { importImageFile } from '../src/core/import-file.ts';
+import { slugifyPath } from '../src/core/sync.ts';
 import { __setEmbedTransportForTests, configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -122,6 +123,84 @@ afterAll(async () => {
 });
 
 describe('managed sync imports images when multimodal embedding is on (#5493 held them, #6529 imports them)', () => {
+  // Protects the real sync/import identity boundary: ordinary image names do not
+  // expose Markdown slug folding. Uses the existing Git/engine harness, no new seam.
+  test('image filename punctuation survives first sync, incremental sync and an unchanged retry without collisions', async () =>
+    withEnv(env, async () => {
+      for (const engine of engines) {
+        providerCalls = 0;
+        const paths = ['notes/Photo+A.png', 'notes/PhotoA.png', 'notes/Café Photo (A).jpg'];
+        const { sourceId, root, head } = await managedSource(engine, { 'notes/plain.md': NOTE, [paths[0]]: PNG, [paths[1]]: PNG });
+        const opts = { sourceId, noPull: true, noEmbed: true, noExtract: true };
+        const first = await performManagedSync(engine, opts);
+        expect(first.status).toBe('first_sync');
+        expect(await lastCommit(engine, sourceId)).toBe(head);
+        const ids = new Map<string, number>();
+        for (const path of paths.slice(0, 2)) {
+          const page = (await engine.getPage(path.toLowerCase(), { sourceId }))!;
+          expect(page).not.toBeNull();
+          expect(page.source_path).toBe(path);
+          ids.set(path, page.id);
+        }
+        expect(new Set(ids.values()).size).toBe(2);
+
+        writeFileSync(join(root, paths[2]), PNG);
+        const next = commit(root, 'add punctuation image');
+        const incremental = await performManagedSync(engine, opts);
+        expect(incremental.status).toBe('synced');
+        expect(await lastCommit(engine, sourceId)).toBe(next);
+        const again = await performManagedSync(engine, opts);
+        expect(again.status).toBe('up_to_date');
+        expect(again.filesImported).toBe(0);
+        for (const path of paths) {
+          const slug = path.toLowerCase();
+          expect(await imagePage(engine, sourceId, slug)).toEqual({ source_path: path, page_kind: 'image', has_vector: false, sealed: true });
+          if (ids.has(path)) expect((await engine.getPage(slug, { sourceId }))!.id).toBe(ids.get(path)!);
+          expect((await engine.getFile(sourceId, path))!.page_id).toBe((await engine.getPage(slug, { sourceId }))!.id);
+          expect(readFileSync(join(root, path))).toEqual(PNG);
+        }
+        expect(await engine.getPage(slugifyPath(paths[2]), { sourceId })).toBeNull();
+        expect(await engine.executeRaw('SELECT slug FROM pages WHERE source_id=$1 AND deleted_at IS NULL ORDER BY slug', [sourceId]))
+          .toEqual(['notes/café photo (a).jpg', 'notes/photo+a.png', 'notes/photoa.png', 'notes/plain'].map(slug => ({ slug })));
+        expect(await heldPaths(engine, sourceId)).toEqual([]);
+        expect(providerCalls).toBe(0);
+      }
+    }), 240_000);
+
+  test('legacy image punctuation keeps its page identity through sync and the matching rename/delete lifecycle', async () =>
+    withEnv(env, async () => {
+      for (const engine of engines) {
+        providerCalls = 0;
+        const original = 'notes/Legacy+Photo.png', moved = 'notes/Moved+Photo.png';
+        const { sourceId, root } = await managedSource(engine, { 'notes/plain.md': NOTE, [original]: PNG }, [original]);
+        const before = (await engine.getPage(original.toLowerCase(), { sourceId }))!;
+        const opts = { sourceId, noPull: true, noEmbed: true, noExtract: true };
+        expect((await performManagedSync(engine, opts)).status).toBe('first_sync');
+        expect((await engine.getPage(original.toLowerCase(), { sourceId }))!.id).toBe(before.id);
+        expect(await engine.getPage('notes/legacyphoto.png', { sourceId })).toBeNull();
+
+        git(root, 'mv', original, moved);
+        const next = commit(root, 'move punctuation image');
+        const renamed = await performManagedSync(engine, opts);
+        expect(renamed.status).toBe('synced');
+        expect(renamed.renamed).toBe(1);
+        expect(await lastCommit(engine, sourceId)).toBe(next);
+        expect(await engine.getPage(original.toLowerCase(), { sourceId })).toBeNull();
+        expect(await imagePage(engine, sourceId, moved.toLowerCase())).toMatchObject({ source_path: moved, sealed: true });
+        expect(await engine.getPage('notes/movedphoto.png', { sourceId })).toBeNull();
+
+        git(root, 'rm', '-q', moved);
+        const removedHead = commit(root, 'remove punctuation image');
+        const removed = await performManagedSync(engine, opts);
+        expect(removed.status).toBe('synced');
+        expect(removed.deleted).toBe(1);
+        expect(await lastCommit(engine, sourceId)).toBe(removedHead);
+        expect(await engine.getPage(moved.toLowerCase(), { sourceId })).toBeNull();
+        expect(await heldPaths(engine, sourceId)).toEqual([]);
+        expect(providerCalls).toBe(0);
+      }
+    }), 240_000);
+
   test('a committed image imports with its image vector and source_path on the first and an incremental sync; nothing is held', async () =>
     withEnv(env, async () => {
       for (const engine of engines) {

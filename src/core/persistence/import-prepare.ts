@@ -10,7 +10,7 @@ import { importCodeFile, importFromContent, importImageFile, isImageFilePath, MA
 import { parseMarkdown, parseMarkdownHead, serializePageToMarkdown } from '../markdown.ts';
 import { applyInference } from '../frontmatter-inference.ts';
 import { getCompanyBrainProfile } from '../company-brain/profile.ts';
-import { hasMalformedPathSegment, isCodeFilePath, slugifyCodePath, slugifyPath } from '../sync.ts';
+import { hasMalformedPathSegment, isCodeFilePath, slugifyCodePath, slugifyImagePath, slugifyPath } from '../sync.ts';
 import { OperationError, opError } from '../ops/contract.ts';
 import { contentRefusalError, importSizeLimit, screenImportContent, type ContentRefusal } from '../import-screen.ts';
 import { fenceWhere } from '../fence-repair/refusal.ts';
@@ -106,7 +106,7 @@ function managedImportPathChecks(sourcePath: string): void {
 
 export function managedImportContent(sourcePath: string, bytes: Buffer, activePack?: ImportPack): { slug: string; content: string } {
   managedImportPathChecks(sourcePath);
-  if (isImageFilePath(sourcePath)) return { slug: sourcePath.replaceAll('\\', '/').toLowerCase(), content: bytes.toString('base64') };
+  if (isImageFilePath(sourcePath)) return { slug: slugifyImagePath(sourcePath), content: bytes.toString('base64') };
   let content = bytes.toString('utf8').replace(/^\uFEFF/, '');
   if (isCodeFilePath(sourcePath)) return { slug: slugifyCodePath(sourcePath), content };
   if (!/\.mdx?$/i.test(sourcePath)) throw opError('invalid_params', 'Managed import supports Markdown, code and supported image files.',

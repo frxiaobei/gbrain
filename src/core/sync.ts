@@ -710,16 +710,21 @@ export function slugifyCodePath(filePath: string): string {
     .join('-');
 }
 
+/** Image identity preserves the filename, including punctuation and extension. */
+export function slugifyImagePath(filePath: string): string {
+  return filePath.replace(/\\/g, '/').toLowerCase();
+}
+
 /**
  * Convert a repo-relative file path to a GBrain page slug.
  */
 export function pathToSlug(
   filePath: string,
   repoPrefix?: string,
-  options: { pageKind?: 'markdown' | 'code' } = {},
+  options: { pageKind?: 'markdown' | 'code' | 'image' } = {},
 ): string {
   const pageKind = options.pageKind || 'markdown';
-  let slug = pageKind === 'code' ? slugifyCodePath(filePath) : slugifyPath(filePath);
+  let slug = pageKind === 'image' ? slugifyImagePath(filePath) : pageKind === 'code' ? slugifyCodePath(filePath) : slugifyPath(filePath);
   if (repoPrefix) slug = `${repoPrefix}/${slug}`;
   return slug.toLowerCase();
 }
@@ -743,7 +748,7 @@ export function pathToSlug(
  * flow through without touching the sync code path.
  */
 export function resolveSlugForPath(filePath: string, repoPrefix?: string): string {
-  const pageKind = isCodeFilePath(filePath) ? 'code' : 'markdown';
+  const pageKind = isImageFilePath(filePath) ? 'image' : isCodeFilePath(filePath) ? 'code' : 'markdown';
   return pathToSlug(filePath, repoPrefix, { pageKind });
 }
 
