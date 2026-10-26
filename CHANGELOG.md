@@ -10,6 +10,16 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.320.3] - 2026-10-26
+
+### Private fork fixes
+
+- Preserve exact foreground image caps across canonical-owner processes with lifetime reservations, immutable scope/model bindings, and same-authorization resume.
+- Stop admitting images after a pending receipt; retain unknown provider liabilities across cancellation, expiry, and process death.
+- Add a namespaced fork-extension ledger and an independent old-owner fence without consuming upstream migration numbers. Deployment requires a database backup; prior unledgered image charges remain unknown.
+
+**To take advantage of v0.60.320.3:** back up the database before the schema upgrade, then use a finite image cap. Resume only with the printed original authorization ID; see [durable image spend](docs/guides/image-spend-authorization.md).
+
 ## [0.60.320.2] - 2026-10-23
 
 ### Private fork hotfix

@@ -1,3 +1,4 @@
+import { applyForkExtensions } from './fork-migrations/runner.ts';
 import type { BrainEngine } from './engine.ts';
 import type { Migration } from './schema-migrations/types.ts';
 import { isLockTimeoutError } from './retry-matcher.ts';
@@ -460,6 +461,7 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
   const backfill = () => resumePageRevisionBackfill(engine).catch(e => console.error(`[migrate] page revision backfill paused (#5216): ${e instanceof Error ? e.message : String(e)}`));
   if (pending.length === 0) {
     await backfill();
+    await applyForkExtensions(engine);
     return { applied: 0, current };
   }
 
@@ -515,6 +517,7 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
     setQuietMigrationNotices(false);
   }
   await backfill();
+  await applyForkExtensions(engine);
   return { applied, current: LATEST_VERSION };
 }
 

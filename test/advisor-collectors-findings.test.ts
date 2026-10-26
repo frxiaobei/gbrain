@@ -1,3 +1,4 @@
+import { appliedForkExtensionRows } from './helpers/fork-extension-probe.ts';
 /**
  * test/advisor-collectors-findings.test.ts — the two advisor collectors with
  * no direct finding-shape coverage:
@@ -55,6 +56,7 @@ describe('collect-migration', () => {
   function versionEngine(version: string | null): BrainEngine {
     return {
       getConfig: async (key: string) => (key === 'version' ? version : null),
+      executeRaw: async (sql: string) => appliedForkExtensionRows(sql) ?? [],
     } as unknown as BrainEngine;
   }
 
@@ -70,6 +72,22 @@ describe('collect-migration', () => {
     // a shell string) — advisor-cli's TTY/spawn gates key on exactly these.
     expect(f.fix.dispatch_id).toBe('apply_migrations');
     expect(f.fix.command_argv).toEqual(['gbrain', 'apply-migrations', '--yes']);
+  });
+
+  test('current official version with missing fork capability still emits a critical finding', async () => {
+    const engine = versionEngine(String(LATEST_VERSION));
+    engine.executeRaw = async () => [];
+    const out = await collectMigration.collect(ctx(engine));
+    expect(out.map(f => [f.id, f.severity])).toEqual([['pending_migration', 'critical']]);
+  });
+
+  test('matching fork ledger with drifted actual guards remains critical', async () => {
+    const engine = { ...versionEngine(String(LATEST_VERSION)), executeRaw: async (sql: string) => {
+      if (sql.includes("to_regclass('gbrain_fork_migrations')")) return [{ ledger: true, storage: true, guard_count: 0 }];
+      return appliedForkExtensionRows(sql) ?? [];
+    } } as unknown as BrainEngine;
+    const out = await collectMigration.collect(ctx(engine));
+    expect(out.map(f => [f.id, f.severity])).toEqual([['pending_migration', 'critical']]);
   });
 
   test('schema at LATEST_VERSION → []', async () => {

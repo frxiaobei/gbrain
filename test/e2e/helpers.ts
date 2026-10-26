@@ -72,6 +72,7 @@ const ALL_TABLES = [
   // the request guard refuses to delete it (cascading from a source delete)
   // in any later protocol-1 session. TRUNCATE fires no row guard.
   'persistence_requests',
+  'persistence_spend_authorizations', // fixture approvals must never cross tests; capability ledger is preserved
 ];
 
 /**

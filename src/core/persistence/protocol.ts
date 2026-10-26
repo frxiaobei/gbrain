@@ -22,7 +22,7 @@ const BRAIN_SHARE = '(SELECT brain_id::text FROM persistence_brain WHERE singlet
 export async function declarePersistenceProtocol(tx: SqlEngine): Promise<void> {
   const inTransaction = (tx as { _pageTransaction?: boolean })._pageTransaction === true;
   if (inTransaction && declared.has(tx)) return;
-  await tx.executeRaw(`SELECT set_config('gbrain.persistence_protocol','2',true),${BRAIN_SHARE}`);
+  await tx.executeRaw(`SELECT set_config('gbrain.paid_import_protocol','1',true),set_config('gbrain.persistence_protocol','2',true),${BRAIN_SHARE}`);
   if (inTransaction) declared.add(tx);
 }
 
@@ -38,17 +38,17 @@ export async function declarePersistenceProtocol(tx: SqlEngine): Promise<void> {
  */
 export async function declareDurablePersistence(tx: SqlEngine, lockTimeout = '1s', statementTimeout = '5s', idleInTransaction?: string): Promise<string | null> {
   const idle = idleInTransaction === undefined ? '' : "set_config('idle_in_transaction_session_timeout',$3,true),";
-  const [row] = await tx.executeRaw<{ brain: string | null }>(`SELECT ${idle}set_config('gbrain.persistence_protocol','2',true),set_config('synchronous_commit','on',true),
+  const [row] = await tx.executeRaw<{ brain: string | null }>(`SELECT ${idle}set_config('gbrain.paid_import_protocol','1',true),set_config('gbrain.persistence_protocol','2',true),set_config('synchronous_commit','on',true),
     set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true),${BRAIN_SHARE}`,
     idleInTransaction === undefined ? [lockTimeout, statementTimeout] : [lockTimeout, statementTimeout, idleInTransaction]);
   if ((tx as { _pageTransaction?: boolean })._pageTransaction === true) declared.add(tx);
   return row?.brain ?? null;
 }
 
-export const PERSISTENCE_PROTOCOL_PREDICATE = "set_config('gbrain.persistence_protocol','2',true)='2'";
+export const PERSISTENCE_PROTOCOL_PREDICATE = "(set_config('gbrain.paid_import_protocol','1',true)='1' AND set_config('gbrain.persistence_protocol','2',true)='2')";
 
 export function assertMutationProtocol(row: Pick<WriteRequest, 'target_kind' | 'protocol_version'>): void {
-  if (((row.target_kind ?? 'page') === 'page' && (row.protocol_version ?? 1) === 1)
+  if (((row.target_kind ?? 'page') === 'page' && [1, 3].includes(row.protocol_version ?? 1))
     || (row.target_kind === 'skill_bundle' && row.protocol_version === 2)) return;
   throw opError('unsupported_mutation_protocol', 'This consumer does not support the request target and protocol version.',
     `This gbrain process cannot apply ${row.target_kind ?? 'page'} requests at protocol ${row.protocol_version ?? 1}, so it left the request untouched. A newer gbrain wrote it: upgrading gbrain on this host (the user's call) lets it be applied.`);

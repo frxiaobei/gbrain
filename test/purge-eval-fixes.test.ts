@@ -28,6 +28,9 @@ import { opError } from '../src/core/ops/contract.ts';
 import { DELETION_INVENTORY } from '../src/core/deletion-inventory.ts';
 import { withEnv } from './helpers/with-env.ts';
 
+import { createImageSpend, imageSpendTotals } from '../src/core/persistence/image-spend.ts';
+import { reserveGroup, settle } from '../src/core/minions/budget-meter.ts';
+
 const CLAIM = 'Vault combination is 7731';
 const home = mkdtempSync(join(tmpdir(), 'gbrain-purge-eval-fixes-'));
 let engine: PGLiteEngine;
@@ -75,6 +78,22 @@ beforeEach(async () => {
 });
 
 describe('purge eval fixes', () => {
+  test('paid authorization scope is reported as a residual without resetting settled or unresolved liability', async () => {
+    const factId = await seed();
+    const auth = await withEnv({ GBRAIN_HOME: home }, () => createImageSpend(engine, 0.025,
+      [{ sourceId: 'default', slug: `images/${CLAIM}.png` }], ['voyage:voyage-multimodal-3']));
+    const reserve = () => reserveGroup(engine, { budgetKey: `image-cap:${auth.id}`, capCents: 2.5,
+      estimatedCents: 0.2, estimateKnown: true, strict: true, model: 'voyage:voyage-multimodal-3', provider: 'voyage' });
+    const paid = await reserve(); await settle(engine, paid.reservationId, 0.05, 'fixture'); await reserve();
+    const before = await engine.executeRaw('SELECT * FROM persistence_spend_authorizations WHERE id=$1::uuid', [auth.id]);
+    const totals = await imageSpendTotals(engine, auth.id);
+    const done = await purgeFact(factId);
+    expect(done.residuals.some((r: { store: string }) => r.store === 'persistence_spend_authorizations')).toBe(true);
+    expect(await engine.executeRaw('SELECT * FROM persistence_spend_authorizations WHERE id=$1::uuid', [auth.id])).toEqual(before);
+    expect(await imageSpendTotals(engine, auth.id)).toEqual(totals);
+    expect(totals).toEqual({ spent_usd: 0.0005, unresolved_usd: 0.002 });
+  }, 60_000);
+
   test('39-2: stored request outcomes carrying the claim are redacted and the receipt says so honestly', async () => {
     const id = await seed();
     const c = context();

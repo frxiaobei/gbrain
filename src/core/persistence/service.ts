@@ -94,7 +94,14 @@ export async function preparePersistedMutation(e: BrainEngine, row: WriteRequest
   if (row.operation === 'submit_job' && row.intent?.kind === 'code_projection_reindex') return (await import('./projection-reindex.ts')).prepareCodeReindex(e, row);
   if (row.operation === 'submit_job' && String(row.intent?.kind).startsWith('managed_sync_')) return (await import('./sync-prepare.ts')).prepareManagedSyncMutation(e, row, cfg, clock);
   if (row.operation === 'submit_job' && String(row.intent?.kind).startsWith('managed_maintenance_')) return (await import('./prepared-maintenance.ts')).prepareMaintenanceMutation(e, row, cfg, clock);
-  if (row.operation === 'put_page' && row.intent?.kind === 'managed_file_import') return (await import('./import-prepare.ts')).prepareManagedImportMutation(e, row, cfg, undefined, clock?.signal ?? signal);
+  if (row.operation === 'put_page' && row.intent?.kind === 'managed_file_import') {
+    const prepare = () => import('./import-prepare.ts').then(m => m.prepareManagedImportMutation(e, row, cfg, undefined, clock?.signal ?? signal));
+    if (row.protocol_version === 3) {
+      if (!row.spend_authorization_id) throw new Error('paid_import_budget: missing request authorization');
+      return (await import('./image-spend.ts')).withImageSpend(e, row.spend_authorization_id, prepare, row);
+    }
+    return prepare();
+  }
   if (row.operation === 'put_page' && row.intent?.kind === 'managed_file_repair') return (await import('./file-repair.ts')).prepareManagedFileRepairMutation(e, row, cfg);
   if (row.operation === 'remember') return (await import('./memory-mutations.ts')).prepareMemoryMutation(e, row, cfg, signal);
   if (row.operation === 'loops_close' && row.intent?.kind === 'retire_loop_fact') return (await import('./loop-fact-retirement.ts')).prepareLoopFactRetirement(e, row, cfg);

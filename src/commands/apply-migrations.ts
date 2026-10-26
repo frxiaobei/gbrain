@@ -1,3 +1,4 @@
+import { readForkExtensionStatus, type ForkExtensionStatus } from '../core/fork-migrations/status.ts';
 /**
  * `gbrain apply-migrations` — migration runner CLI.
  *
@@ -293,7 +294,7 @@ function buildPlan(idx: CompletedIndex, installed: string, filterVersion?: strin
  * print the identical all-pending plan at exit 0.
  */
 type DbProbeOutcome =
-  | { status: 'connected'; schemaVer: number; latest: number }
+  | { status: 'connected'; schemaVer: number; latest: number; fork_extensions?: ForkExtensionStatus[] }
   | { status: 'unreachable'; reason: string; access?: string }
   | { status: 'skipped'; reason: string };
 
@@ -949,7 +950,7 @@ async function preflightSchema(
         dbProbe = { status: 'skipped', reason: 'pglite manages schema in-process' };
       } else {
         const { engine: eng, version: schemaVer } = await connectAtSchemaVersion(cfg);
-        dbProbe = { status: 'connected', schemaVer, latest: LATEST_VERSION };
+        dbProbe = { status: 'connected', schemaVer, latest: LATEST_VERSION, fork_extensions: await readForkExtensionStatus(eng) };
         schemaBehind = await resolveSchemaBehind({
           schemaVer,
           latest: LATEST_VERSION,

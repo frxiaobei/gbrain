@@ -85,7 +85,7 @@ describe('resetPgliteState', () => {
       await resetPgliteState(engine);
       const tables = await engine.executeRaw<{ tablename: string }>("SELECT tablename FROM pg_tables WHERE schemaname='public'");
       for (const { tablename } of tables) {
-        if (['schema_version', 'page_generation_clock', 'persistence_brain', 'sources'].includes(tablename)) continue;
+        if (['schema_version', 'page_generation_clock', 'persistence_brain', 'gbrain_fork_migrations', 'sources'].includes(tablename)) continue;
         const rows = await engine.executeRaw(`SELECT count(*)::int AS n FROM public."${tablename.replaceAll('"', '""')}"`);
         expect(rows).toEqual([{ n: 0 }]);
       }
@@ -95,6 +95,16 @@ describe('resetPgliteState', () => {
     } finally {
       await engine.executeRaw('ALTER TABLE reset_fixture_parent DROP COLUMN child_id');
     }
+  });
+
+  test('preserves fork capability history but removes test approval scope', async () => {
+    const ledger = await engine.executeRaw('SELECT * FROM gbrain_fork_migrations');
+    expect(ledger).toHaveLength(1);
+    await engine.executeRaw(`INSERT INTO persistence_spend_authorizations(id,principal_kind,principal_id,cap_cents,scope,models)
+      VALUES('00000000-0000-4000-8000-000000000001','local_cli','fixture',2.5,'[{"sourceId":"default","slug":"fixture.png"}]','["voyage:voyage-multimodal-3"]')`);
+    await resetPgliteState(engine);
+    expect(await engine.executeRaw('SELECT * FROM gbrain_fork_migrations')).toEqual(ledger);
+    expect(await engine.executeRaw('SELECT * FROM persistence_spend_authorizations')).toEqual([]);
   });
 
   test('preserves schema and generation infrastructure but rotates the logical brain identity', async () => {

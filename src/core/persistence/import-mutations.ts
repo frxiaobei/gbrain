@@ -1,3 +1,5 @@
+import { getCurrentBudgetTracker } from '../budget/context.ts';
+import { hasAIInvocationGuard } from '../ai/invocation-guard.ts';
 import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -12,7 +14,8 @@ import { SCREENING_SHARED_READS, batchSharedReads, emitFenceNotice, initializeLo
 import { admitBatch } from './page-batch.ts';
 import { writeOutcomeUnknown } from './admission-retry.ts';
 import { assertPersistenceAccepting, waitForWrites } from './service.ts';
-import type { WriteAdmission } from './journal.ts';
+import { admitWrite, type WriteAdmission } from './journal.ts';
+import { assertImageSpendHandle, type ImageSpendHandle } from './image-spend.ts';
 import type { WriteRequest } from './model.ts';
 import { digest, sha256 } from './digest.ts';
 import { assertImportPaths, managedImportContent, managedStreamedIdentity, prepareManagedImportMutation, readImportBytes, type ImportPack, type ManagedImportBodyRef,
@@ -65,7 +68,7 @@ export async function settleManagedImportBatch(engine: BrainEngine, batch: reado
 const IMPORT_OP = 'managed-file-import';
 /** How long an import waits for one file's publication, as a single import always has. */
 const IMPORT_WAIT_MS = 30_000;
-type PendingImport = ManagedImportIntent & { request_id: string; source_id: string };
+type PendingImport = ManagedImportIntent & { request_id: string; source_id: string; spend_authorization_id?: string };
 /**
  * GBRA-69: the durable pre-admission checkpoint holds the admission's expectations and request id,
  * not the file's content: its key binds the input hash, so a retry restores the content from the
@@ -75,7 +78,7 @@ type PendingImport = ManagedImportIntent & { request_id: string; source_id: stri
 type StoredImport = Omit<PendingImport, 'content'> & { content?: string };
 
 export async function importManagedFile(engine: BrainEngine, filePath: string, sourcePath: string,
-  opts: { sourceId?: string; noEmbed?: boolean; activePack?: ImportPack; signal?: AbortSignal; slugRoot?: string } = {}): Promise<ImportResult> {
+  opts: { sourceId?: string; noEmbed?: boolean; activePack?: ImportPack; signal?: AbortSignal; spendAuthorization?: ImageSpendHandle; slugRoot?: string } = {}): Promise<ImportResult> {
   const [settled] = await importManagedFiles(engine, [{ filePath, sourcePath }], opts);
   if (settled!.status === 'rejected') throw settled!.reason;
   return settled!.value;
@@ -90,12 +93,16 @@ export async function importManagedFile(engine: BrainEngine, filePath: string, s
  * there; that file and the rest import after it, as they would one by one.
  */
 export async function importManagedFiles(engine: BrainEngine, files: readonly ManagedImportFile[],
-  opts: { sourceId?: string; noEmbed?: boolean; activePack?: ImportPack; signal?: AbortSignal; slugRoot?: string } = {}): Promise<PromiseSettledResult<ImportResult>[]> {
+  opts: { sourceId?: string; noEmbed?: boolean; activePack?: ImportPack; signal?: AbortSignal; spendAuthorization?: ImageSpendHandle; slugRoot?: string } = {}): Promise<PromiseSettledResult<ImportResult>[]> {
   const caller = currentSubmissionAuthority();
   if (caller && caller.kind !== 'application' || currentVerifiedLocalWriter()?.remote) {
     throw trustedCliRequired('Managed filesystem import requires the trusted local CLI.');
   }
   opts.signal?.throwIfAborted();
+  if (opts.spendAuthorization) assertImageSpendHandle(opts.spendAuthorization);
+  if (!opts.noEmbed && !opts.spendAuthorization && files.some(file => isImageFilePath(file.sourcePath)) && (getCurrentBudgetTracker() || hasAIInvocationGuard())) {
+    throw opError('invalid_params', 'paid_import_budget: an in-process budget cannot authorize durable image work.', 'Use the capped image sweep with a durable authorization; nothing was admitted.');
+  }
   const settled: PromiseSettledResult<ImportResult>[] = new Array(files.length);
   const fail = (i: number, reason: unknown) => { settled[i] = { status: 'rejected', reason }; };
   const sourceId = opts.sourceId ?? 'default';
@@ -142,7 +149,7 @@ export async function importManagedFiles(engine: BrainEngine, files: readonly Ma
 
 async function importPlanned(ctx: OperationContext, binding: WorktreeBinding,
   planned: Array<{ i: number; slug: string; content?: string; bodyRef?: ManagedImportBodyRef; sourcePath: string; path: string; inputPath: string; inputHash: string; target: string }>,
-  opts: { noEmbed?: boolean; activePack?: ImportPack },
+  opts: { noEmbed?: boolean; activePack?: ImportPack; spendAuthorization?: ImageSpendHandle },
   fail: (i: number, reason: unknown) => void, done: (i: number, value: ImportResult) => void): Promise<void> {
   const { engine } = ctx;
   const sourceId = binding.source_id;
@@ -179,7 +186,9 @@ async function importPlanned(ctx: OperationContext, binding: WorktreeBinding,
     await withScreeningPaths(async () => { for (const member of members) {
       try {
         const stored = pending.get(member.key);
-        if (stored) { resume(member, stored); continue; }
+        if (stored) {
+          if (stored.spend_authorization_id !== opts.spendAuthorization?.id) throw opError('invalid_params', 'The saved import belongs to another spend authorization.', 'Inspect the original request; do not replace its approved budget.');
+          resume(member, stored); continue; }
         const snapshot = screened ? screened.get(pageSnapshotKey(sourceId, member.slug)) ?? null : await engine.readPageSnapshot(member.slug, { sourceId, includeDeleted: true });
         // The input is the canonical file itself (the common case): its hash was taken from the bytes just read.
         const targetHash = member.target === member.inputPath ? member.inputHash : existsSync(member.target) ? sha256(readImportBytes(member.target)) : null;
@@ -190,7 +199,7 @@ async function importPlanned(ctx: OperationContext, binding: WorktreeBinding,
           noEmbed: !!opts.noEmbed, ...(opts.activePack ? { activePack: opts.activePack } : {}) };
         // #5470: an import whose publication would change nothing takes no admission.
         if (await unchangedManagedImport(screening, binding, intent, snapshot)) { settle(member, { slug: member.slug, status: 'skipped', chunks: 0 }); continue; }
-        member.params = { ...intent, ...(members.length > 1 ? { import_batch: batch } : {}), request_id: randomUUID(), source_id: sourceId };
+        member.params = { ...intent, ...(opts.spendAuthorization ? { spend_authorization_id: opts.spendAuthorization.id } : {}), ...(members.length > 1 ? { import_batch: batch } : {}), request_id: randomUUID(), source_id: sourceId };
         fresh.push(member);
       } catch (error) { refuse(member, error); }
     } });
@@ -204,7 +213,7 @@ async function importPlanned(ctx: OperationContext, binding: WorktreeBinding,
   } catch (error) { for (const member of [...open]) refuse(member, error); return; }
   const submitted = members.filter(member => open.has(member));
   if (!submitted.length) return;
-  const outcomes = await submitManagedImports(ctx, batch, submitted.map(member => member.params!));
+  const outcomes = await submitManagedImports(ctx, batch, submitted.map(member => member.params!), opts.spendAuthorization);
   const cleared: typeof submitted = [];
   submitted.forEach((member, position) => {
     const outcome = outcomes[position]!;
@@ -235,7 +244,7 @@ async function importPlanned(ctx: OperationContext, binding: WorktreeBinding,
  * would settle it alone; a request still pending after its share of the
  * wait settles as `write_pending`.
  */
-async function submitManagedImports(ctx: OperationContext, batch: string, params: readonly PendingImport[]): Promise<PromiseSettledResult<Record<string, unknown>>[]> {
+async function submitManagedImports(ctx: OperationContext, batch: string, params: readonly PendingImport[], spend?: ImageSpendHandle): Promise<PromiseSettledResult<Record<string, unknown>>[]> {
   const settled: PromiseSettledResult<Record<string, unknown>>[] = new Array(params.length);
   const rows: Array<{ index: number; row: WriteRequest; admitted: boolean; typeWarning?: unknown; slugAdvisory?: unknown }> = [];
   try {
@@ -245,13 +254,18 @@ async function submitManagedImports(ctx: OperationContext, batch: string, params
       for (let index = 0; index < params.length; index++) {
         try {
           const prepared = await preparePageAdmission(index === 0 ? own : shared, { operation: 'put_page', params: params[index]!, managedFileImport: true });
-          if (prepared.prior) rows.push({ index, row: prepared.prior, admitted: false });
+          if (prepared.prior) {
+            if ((prepared.prior.spend_authorization_id ?? undefined) !== spend?.id) throw opError('invalid_params', 'The request keeps its original spend authorization.', 'Inspect the original request; no new budget was attached.');
+            rows.push({ index, row: prepared.prior, admitted: false });
+          }
           else admissions.push({ index, admission: prepared.admission, typeWarning: prepared.typeWarning, slugAdvisory: prepared.slugAdvisory });
         } catch (reason) { settled[index] = { status: 'rejected', reason }; }
       }
       if (!admissions.length) return;
       try {
-        const admitted = await admitBatch(ctx, batch, admissions.map(entry => entry.admission));
+        const admitted = spend
+          ? await Promise.all(admissions.map(entry => admitWrite(ctx.engine, { ...entry.admission, protocolVersion: 3, spendAuthorizationId: spend.id })))
+          : await admitBatch(ctx, batch, admissions.map(entry => entry.admission));
         admissions.forEach((entry, position) => rows.push({ index: entry.index, row: admitted[position]!, admitted: true, typeWarning: entry.typeWarning, slugAdvisory: entry.slugAdvisory }));
       } catch (reason) {
         // #6355: the batch's outcome is unknown for every file; each file names its own request id to read (and replay).

@@ -19,6 +19,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { seedImageSpendGraduation } from '../helpers/image-spend-graduation.ts';
+import { imageSpendTotals } from '../../src/core/persistence/image-spend.ts';
+import { readForkExtensionStatus } from '../../src/core/fork-migrations/status.ts';
 import postgres from '#postgres';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
@@ -34,6 +37,7 @@ import { copiedEntries, copyAll, digestMismatches } from '../helpers/graduation-
 import { assertRelationSet } from '../../src/core/persistence/graduation-inventory.ts';
 import { requirePostgresTestDatabase } from '../helpers/test-backends.ts';
 
+const IMAGE_AUTH = randomUUID(), IMAGE_REQUEST = randomUUID();
 const databaseUrl = requirePostgresTestDatabase();
 const PAGES = Number(process.env.GRADUATION_COPY_PAGES ?? 1000);
 const priorHome = process.env.GBRAIN_HOME;
@@ -122,6 +126,13 @@ async function graduateInto(target: PostgresEngine, bypass: TriggerBypass, runId
 
 async function assertEqualCopy(target: PostgresEngine, entries: readonly InventoryEntry[]): Promise<void> {
   expect(await digestMismatches({ source, target }, entries)).toEqual([]);
+  expect(await imageSpendTotals(target, IMAGE_AUTH)).toEqual({ spent_usd: .0005, unresolved_usd: .002 });
+  expect((await target.executeRaw('SELECT * FROM persistence_spend_authorizations WHERE id=$1::uuid', [IMAGE_AUTH]))[0])
+    .toEqual((await source.executeRaw('SELECT * FROM persistence_spend_authorizations WHERE id=$1::uuid', [IMAGE_AUTH]))[0]);
+  expect((await target.executeRaw('SELECT protocol_version,spend_authorization_id FROM persistence_requests WHERE id=$1::uuid', [IMAGE_REQUEST]))[0])
+    .toEqual({ protocol_version: 3, spend_authorization_id: IMAGE_AUTH });
+  expect((await readForkExtensionStatus(target))[0]!.state).toBe('applied');
+  expect((await target.executeRaw<{ own: boolean }>("SELECT verified_at>'2000-01-02'::timestamptz AS own FROM gbrain_fork_migrations"))[0]!.own).toBe(true);
   expect(await fkOrphans(target)).toEqual([]);
   const disabled = await target.executeRaw(`SELECT tgrelid::regclass::text AS relation, tgname FROM pg_trigger WHERE NOT tgisinternal AND tgenabled = 'D'`);
   expect(disabled).toEqual([]);
@@ -149,6 +160,7 @@ beforeAll(async () => {
   timings.drain_ms = Math.round(performance.now() - d);
   expect(result.blockers).toEqual([]);
   drained = result.drained;
+  await seedImageSpendGraduation(source, fixture.queuedRequestId, IMAGE_AUTH, IMAGE_REQUEST);
   await freezeSource(source);
   await assertRelationSet(source, 'pglite');
 }, 1_800_000);

@@ -109,6 +109,8 @@
       "files.files_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
       "files.files_storage_path_key": "u UNIQUE (storage_path)",
       "gbrain_cycle_locks.gbrain_cycle_locks_pkey": "p PRIMARY KEY (id)",
+      "gbrain_fork_migrations.gbrain_fork_migrations_pkey": "p PRIMARY KEY (id)",
+      "gbrain_fork_migrations.gbrain_fork_migrations_version_check": "c CHECK ((version > 0))",
       "ingest_log.ingest_log_pkey": "p PRIMARY KEY (id)",
       "link_edge_proposals.link_edge_proposals_a_to_page_id_fkey": "f FOREIGN KEY (a_to_page_id) REFERENCES pages(id) ON DELETE CASCADE",
       "link_edge_proposals.link_edge_proposals_b_to_page_id_fkey": "f FOREIGN KEY (b_to_page_id) REFERENCES pages(id) ON DELETE CASCADE",
@@ -316,13 +318,19 @@
       "persistence_requests.persistence_requests_preparation_attempts_check": "c CHECK ((preparation_attempts >= 0))",
       "persistence_requests.persistence_requests_principal_kind_check": "c CHECK ((principal_kind = ANY (ARRAY['oauth_client'::text, 'legacy_token'::text, 'local_cli'::text, 'local_stdio'::text, 'application'::text])))",
       "persistence_requests.persistence_requests_principal_kind_principal_id_request_id_key": "u UNIQUE (principal_kind, principal_id, request_id)",
-      "persistence_requests.persistence_requests_protocol_version_check": "c CHECK ((protocol_version = ANY (ARRAY[1, 2])))",
+      "persistence_requests.persistence_requests_protocol_version_check": "c CHECK ((protocol_version = ANY (ARRAY[1, 2, 3])))",
       "persistence_requests.persistence_requests_sequence_key": "u UNIQUE (sequence)",
+      "persistence_requests.persistence_requests_spend_authorization_id_fkey": "f FOREIGN KEY (spend_authorization_id) REFERENCES persistence_spend_authorizations(id)",
       "persistence_requests.persistence_requests_state_check": "c CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'recovering'::text, 'committed'::text, 'conflict'::text, 'failed'::text, 'cancelled'::text])))",
       "persistence_requests.persistence_requests_target_kind_check": "c CHECK ((target_kind = ANY (ARRAY['page'::text, 'skill_bundle'::text])))",
       "persistence_requests.persistence_requests_worktree_id_fkey": "f FOREIGN KEY (worktree_id) REFERENCES persistence_worktrees(id)",
       "persistence_source_bindings.persistence_source_bindings_pkey": "p PRIMARY KEY (source_id)",
       "persistence_source_bindings.persistence_source_bindings_worktree_id_fkey": "f FOREIGN KEY (worktree_id) REFERENCES persistence_worktrees(id)",
+      "persistence_spend_authorizations.persistence_spend_authorizations_cap_cents_check": "c CHECK ((cap_cents > (0)::numeric))",
+      "persistence_spend_authorizations.persistence_spend_authorizations_models_check": "c CHECK ((jsonb_typeof(models) = 'array'::text))",
+      "persistence_spend_authorizations.persistence_spend_authorizations_pkey": "p PRIMARY KEY (id)",
+      "persistence_spend_authorizations.persistence_spend_authorizations_principal_kind_check": "c CHECK ((principal_kind = 'local_cli'::text))",
+      "persistence_spend_authorizations.persistence_spend_authorizations_scope_check": "c CHECK ((jsonb_typeof(scope) = 'array'::text))",
       "persistence_topology_changes.persistence_topology_changes_intent_bytes_check": "c CHECK ((intent_bytes >= 0))",
       "persistence_topology_changes.persistence_topology_changes_pkey": "p PRIMARY KEY (id)",
       "persistence_topology_changes.persistence_topology_changes_principal_id_request_id_key": "u UNIQUE (principal_id, request_id)",
@@ -513,8 +521,9 @@
       "gbrain_graduation_fence()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=cd4642fe8deee2a3c14ef41f53862f0a449b2d8a10e47177bd4f5d2e05ce8803",
       "gbrain_guard_effect_protocol()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=e8b5589dafd4a355106104daffdf57c7776d34fe18c5b5f5336a27de188688a1",
       "gbrain_guard_protocol_activation()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=f27354966c25d961fcecbffebba0e45747ad3de23575351319f6aee4f9aefd47",
-      "gbrain_guard_request_protocol()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=12baf1d365a8aa3009ac0fe6605497e6433304e8d5915a3fc0b0b39ad748f6c2",
+      "gbrain_guard_request_protocol()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=303814442e55ca2aba101057cf60eee1f72f09a2e494a5252b6f4c967020f0e6",
       "gbrain_guard_skill_publication()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=e854c0d058e75a65c3a90127c5c417380975100e83fc34288f6085e786df10a9",
+      "gbrain_guard_spend_authorization()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=56218b2755138b260032daff557abd954592012428f1df43435a88765772234d",
       "gbrain_lease_shared_skill_delivery()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=5e493c1ac8dce8cb025a736629e563437c4b214744137c302c532c20bf7e7acf",
       "gbrain_preserve_fact_withdrawal()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=9beb118551a08451a228146373f50f2aa2ce0cfe89937e937d361b33224aa0aa",
       "gbrain_queue_page_projection()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=6c544b9c129b6a17dcabeb5ee8d44a2b0e0af9d02ca3fe47c7d7f22ec313042c",
@@ -671,6 +680,9 @@
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "gbrain_cycle_locks": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "gbrain_fork_migrations": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "ingest_log": [
@@ -833,6 +845,9 @@
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "persistence_source_bindings": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "persistence_spend_authorizations": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "persistence_topology_changes": [
@@ -1094,6 +1109,7 @@
       "files_pkey": "CREATE UNIQUE INDEX files_pkey ON public.files USING btree (id)",
       "files_storage_path_key": "CREATE UNIQUE INDEX files_storage_path_key ON public.files USING btree (storage_path)",
       "gbrain_cycle_locks_pkey": "CREATE UNIQUE INDEX gbrain_cycle_locks_pkey ON public.gbrain_cycle_locks USING btree (id)",
+      "gbrain_fork_migrations_pkey": "CREATE UNIQUE INDEX gbrain_fork_migrations_pkey ON public.gbrain_fork_migrations USING btree (id)",
       "idx_access_tokens_hash": "CREATE INDEX idx_access_tokens_hash ON public.access_tokens USING btree (token_hash) WHERE (revoked_at IS NULL)",
       "idx_budget_reservations_expires": "CREATE INDEX idx_budget_reservations_expires ON public.budget_reservations USING btree (expires_at) WHERE (status = 'held'::text)",
       "idx_chat_usage_log_created": "CREATE INDEX idx_chat_usage_log_created ON public.chat_usage_log USING btree (created_at)",
@@ -1339,6 +1355,7 @@
       "persistence_requests_sync_run_open": "CREATE INDEX persistence_requests_sync_run_open ON public.persistence_requests USING btree (worktree_id, ((intent ->> 'runId'::text))) WHERE ((state <> 'committed'::text) AND ((intent ->> 'kind'::text) = ANY (ARRAY['managed_sync_import'::text, 'managed_sync_delete'::text])))",
       "persistence_requests_sync_watermark": "CREATE INDEX persistence_requests_sync_watermark ON public.persistence_requests USING btree (worktree_id, source_incarnation, completed_at DESC) WHERE ((state = 'committed'::text) AND (COALESCE((intent ->> 'kind'::text), ''::text) ~~ 'managed_sync_%'::text))",
       "persistence_source_bindings_pkey": "CREATE UNIQUE INDEX persistence_source_bindings_pkey ON public.persistence_source_bindings USING btree (source_id)",
+      "persistence_spend_authorizations_pkey": "CREATE UNIQUE INDEX persistence_spend_authorizations_pkey ON public.persistence_spend_authorizations USING btree (id)",
       "persistence_topology_changes_pkey": "CREATE UNIQUE INDEX persistence_topology_changes_pkey ON public.persistence_topology_changes USING btree (id)",
       "persistence_topology_changes_principal_id_request_id_key": "CREATE UNIQUE INDEX persistence_topology_changes_principal_id_request_id_key ON public.persistence_topology_changes USING btree (principal_id, request_id)",
       "persistence_topology_recovering": "CREATE INDEX persistence_topology_recovering ON public.persistence_topology_changes USING btree (created_at) WHERE (state = 'recovering'::text)",
@@ -2313,6 +2330,16 @@
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },
+      "gbrain_fork_migrations": {
+        "columns": [
+          "1 id text/text NOT NULL",
+          "2 version integer/int4 NOT NULL",
+          "3 ddl_sha256 text/text NOT NULL",
+          "4 applied_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
+          "5 verified_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
       "ingest_log": {
         "columns": [
           "1 id integer/int4 NOT NULL DEFAULT nextval('ingest_log_id_seq'::regclass)",
@@ -2461,7 +2488,8 @@
           "11 expires_at timestamp with time zone/timestamptz NOT NULL",
           "12 estimate_known boolean/bool NOT NULL DEFAULT true",
           "13 usage_unknown_reason text/text NULL",
-          "14 budget_key text/text NULL"
+          "14 budget_key text/text NULL",
+          "15 write_request_id uuid/uuid NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },
@@ -3213,7 +3241,8 @@
           "43 admitter_segment_reader boolean/bool NULL",
           "44 consumer_segment_reader boolean/bool NULL",
           "45 transient_interruptions integer/int4 NOT NULL DEFAULT 0",
-          "46 next_attempt_at timestamp with time zone/timestamptz NULL"
+          "46 next_attempt_at timestamp with time zone/timestamptz NULL",
+          "47 spend_authorization_id uuid/uuid NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },
@@ -3224,6 +3253,19 @@
           "3 worktree_id uuid/uuid NOT NULL",
           "4 relative_path text/text NOT NULL DEFAULT ''::text",
           "5 topology_generation bigint/int8 NOT NULL DEFAULT 1"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "persistence_spend_authorizations": {
+        "columns": [
+          "1 id uuid/uuid NOT NULL",
+          "2 principal_kind text/text NOT NULL",
+          "3 principal_id text/text NOT NULL",
+          "4 cap_cents numeric/numeric NOT NULL",
+          "5 scope jsonb/jsonb NOT NULL",
+          "6 models jsonb/jsonb NOT NULL",
+          "7 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
+          "8 revoked boolean/bool NOT NULL DEFAULT false"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },
@@ -4105,6 +4147,7 @@
       "persistence_brain.gbrain_protocol_activation": "CREATE TRIGGER gbrain_protocol_activation BEFORE UPDATE ON public.persistence_brain FOR EACH ROW EXECUTE FUNCTION gbrain_guard_protocol_activation()",
       "persistence_effects.gbrain_effect_protocol": "CREATE TRIGGER gbrain_effect_protocol BEFORE INSERT OR DELETE OR UPDATE ON public.persistence_effects FOR EACH ROW EXECUTE FUNCTION gbrain_guard_effect_protocol()",
       "persistence_requests.gbrain_request_protocol": "CREATE TRIGGER gbrain_request_protocol BEFORE INSERT OR DELETE OR UPDATE ON public.persistence_requests FOR EACH ROW EXECUTE FUNCTION gbrain_guard_request_protocol()",
+      "persistence_spend_authorizations.gbrain_spend_authorization_immutable": "CREATE TRIGGER gbrain_spend_authorization_immutable BEFORE DELETE OR UPDATE ON public.persistence_spend_authorizations FOR EACH ROW EXECUTE FUNCTION gbrain_guard_spend_authorization()",
       "shared_skill_delivery_batches.shared_skill_delivery_lease": "CREATE TRIGGER shared_skill_delivery_lease AFTER INSERT OR UPDATE OF revisions ON public.shared_skill_delivery_batches FOR EACH ROW EXECUTE FUNCTION gbrain_lease_shared_skill_delivery()",
       "shared_skill_heads.gbrain_skill_publication": "CREATE TRIGGER gbrain_skill_publication BEFORE INSERT OR DELETE OR UPDATE ON public.shared_skill_heads FOR EACH ROW EXECUTE FUNCTION gbrain_guard_skill_publication()",
       "shared_skill_packs.gbrain_skill_publication": "CREATE TRIGGER gbrain_skill_publication BEFORE INSERT OR DELETE OR UPDATE ON public.shared_skill_packs FOR EACH ROW EXECUTE FUNCTION gbrain_guard_skill_publication()",

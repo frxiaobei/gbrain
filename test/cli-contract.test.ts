@@ -125,7 +125,7 @@ const JSON_ROWS: Record<string, JsonRow> = {
   // W1 belief ledger: status is read-only; an unknown source is an invalid_params envelope.
   beliefs: { ok: ['beliefs', 'status', '--source', 'notes', '--json'], fail: ['beliefs', 'status', '--source', 'no-such-source', '--json'], failOnBrain: true },
   // D8: the dry run resolves and prints the target without writing; an unwired harness id is a coded refusal.
-  setup: { ok: ['setup', 'claude-code', '--dry-run', '--json', '--gbrain-bin', process.execPath], fail: ['setup', 'codex', '--json'], okOnEmpty: true },
+  setup: { ok: ['setup', 'claude-code', '--dry-run', '--json', '--gbrain-bin', process.execPath], fail: ['setup', 'definitely-not-a-harness', '--json'], okOnEmpty: true },
 };
 
 function parsedShape(mode: 'document' | 'ndjson', stdout: string): unknown[] {

@@ -1,3 +1,4 @@
+import { appliedForkExtensionRows } from './helpers/fork-extension-probe.ts';
 /**
  * Tests for src/commands/advisor.ts — the `gbrain advisor` CLI surface (plan E1).
  *
@@ -75,6 +76,7 @@ function fakeEngine(opts: FakeEngineOpts = {}): BrainEngine {
       return null; // schema_pack → default resolution; everything else unset
     },
     executeRaw: async (sql: string): Promise<unknown[]> => {
+      const extension = appliedForkExtensionRows(sql); if (extension) return extension;
       // collect-stalled-jobs' stale-sync arm (the deterministic `info` lever).
       if (sql.includes("interval '7 days'")) {
         return (opts.staleSyncIds ?? []).map((id) => ({ id }));

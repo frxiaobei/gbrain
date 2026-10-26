@@ -1,10 +1,11 @@
+import { readForkExtensionStatus } from './fork-migrations/status.ts';
 import type { BrainEngine } from './engine.ts';
 import { LATEST_SCHEMA_VERSION } from './schema-migrations/latest.generated.ts';
 
 /**
  * Cheap probe: does this engine have schema migrations pending?
  *
- * Reads the `version` config row in a single round-trip (no schema replay,
+ * Reads the `version` config row and actual fork capability state (no schema replay,
  * no migration apply) and compares it with the generated latest version, so
  * it never loads the migration modules themselves (migrate.ts does; it
  * re-exports this). Used by `connectEngine` to gate `initSchema()` so
@@ -23,7 +24,7 @@ export async function hasPendingMigrations(engine: BrainEngine): Promise<boolean
   try {
     const currentStr = await engine.getConfig('version');
     const current = parseInt(currentStr || '1', 10);
-    return current < LATEST_SCHEMA_VERSION;
+    return current < LATEST_SCHEMA_VERSION || (await readForkExtensionStatus(engine)).some(extension => extension.state !== 'applied');
   } catch {
     return true;
   }

@@ -1,9 +1,20 @@
+import { readForkExtensionStatus } from '../../src/core/fork-migrations/status.ts';
 import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { LATEST_VERSION } from '../../src/core/migrate.ts';
 import { runSchemaTransition } from '../../src/core/embedding-migration.ts';
 import { LEGACY_EMBEDDING_CONFIG } from '../helpers/legacy-embedding-config.ts';
 import { getEngine, hasDatabase, setupDB, setupLegacyEmbeddingDB, teardownDB } from './helpers.ts';
+
+async function expectNoOfficialReplay(calls: readonly (readonly [number, string])[]) {
+  expect(calls.length).toBeLessThanOrEqual(2);
+  for (const [version, sql] of calls) {
+    expect(version).toBe(0);
+    expect(sql.trim()).toMatch(/^(CREATE TABLE IF NOT EXISTS gbrain_fork_migrations|CREATE OR REPLACE FUNCTION gbrain_guard_request_protocol\(\))/);
+    expect(sql).not.toMatch(/ALTER\s+TABLE/i);
+  }
+  expect((await readForkExtensionStatus(getEngine()))[0]!.state).toBe('applied');
+}
 
 (hasDatabase() ? describe : describe.skip)('PostgreSQL fixture reset lifecycle', () => {
   beforeAll(async () => { await setupLegacyEmbeddingDB(); }, 120_000);
@@ -19,7 +30,7 @@ import { getEngine, hasDatabase, setupDB, setupLegacyEmbeddingDB, teardownDB } f
     const migrations = spyOn(PostgresEngine.prototype, 'runMigration');
     try {
       const reset = await setupDB();
-      expect(migrations).not.toHaveBeenCalled();
+      await expectNoOfficialReplay(migrations.mock.calls);
       expect(await reset.getConfig('version')).toBe(String(LATEST_VERSION));
       expect(await reset.getConfig('fixture.operator-setting')).toBeNull();
       expect(await reset.getPage('fixture-page')).toBeNull();
@@ -53,8 +64,18 @@ import { getEngine, hasDatabase, setupDB, setupLegacyEmbeddingDB, teardownDB } f
       expect(seeded.clock).toHaveLength(1);
       migrations.mockClear();
       expect(await defaults(await setupDB())).toEqual(seeded);
-      expect(migrations).not.toHaveBeenCalled();
+      await expectNoOfficialReplay(migrations.mock.calls);
     } finally { migrations.mockRestore(); }
+  });
+
+  test('warm reset retains fork capability history and clears test authorizations', async () => {
+    const original = getEngine();
+    const ledger = await original.executeRaw('SELECT id,version,ddl_sha256,applied_at FROM gbrain_fork_migrations');
+    await original.executeRaw(`INSERT INTO persistence_spend_authorizations(id,principal_kind,principal_id,cap_cents,scope,models)
+      VALUES('00000000-0000-4000-8000-000000000001','local_cli','fixture',2.5,'[{"sourceId":"default","slug":"fixture.png"}]','["voyage:voyage-multimodal-3"]')`);
+    const reset = await setupDB();
+    expect(await reset.executeRaw('SELECT id,version,ddl_sha256,applied_at FROM gbrain_fork_migrations')).toEqual(ledger);
+    expect(await reset.executeRaw('SELECT * FROM persistence_spend_authorizations')).toEqual([]);
   });
 
   test('a missing ledger cannot be mistaken for an already-migrated fixture', async () => {

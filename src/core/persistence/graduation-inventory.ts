@@ -134,6 +134,7 @@ export const GRADUATION_INVENTORY: Inventory = {
     }),
     carry('persistence_local_writers', 'security', 'Local writer credentials (cli/stdio) and revocations.'),
     carry('persistence_requests', 'user_data', 'Write requests: idempotency records and outcomes, so replays return the stored outcome; client_request_id keeps the client\'s original id beside its UUIDv5.'),
+    carry('persistence_spend_authorizations', 'security', 'Immutable image spend approvals, original scope/model bindings and revocations; the carried spend reservations must keep consuming the same cap.'),
     carry('persistence_source_bindings', 'user_data', 'Source to worktree bindings.'),
     carry('persistence_topology_changes', 'user_data', 'Topology change journal.'),
     carry('persistence_worktree_refreshes', 'user_data', 'Worktree refresh journal.'),
@@ -209,6 +210,7 @@ export const GRADUATION_INVENTORY: Inventory = {
     entry('oauth_codes', 'discard', 'security', 'One-time authorization codes; an in-flight OAuth handshake restarts.'),
 
     entry('page_links', 'schema_owned', 'operational', 'View over links; each engine\'s schema defines it.', { kind: 'view' }),
+    entry('gbrain_fork_migrations', 'schema_owned', 'operational', 'Target-installed fork DDL capabilities and verification times; target init must independently install and verify its actual guards.'),
     entry('file_migration_ledger', 'schema_owned', 'operational', 'Postgres-only file storage migration ledger written by the target initSchema.', { engines: { pglite: false, postgres: true } }),
     entry('trust_policy_state', 'schema_owned', 'operational', 'Each engine\'s own trust policy generation counter (#5575 ENG-11), seeded by its migration; caches compare it per engine, so it is never copied or compared.'),
     entry('persistence_graduation', 'schema_owned', 'operational', 'Each engine\'s own graduation custody row (source: quiesced/cutover; target: copying..authoritative); never copied, digested or compared.'),

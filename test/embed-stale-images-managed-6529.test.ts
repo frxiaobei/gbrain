@@ -20,9 +20,10 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
-import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
+import { disposePersistenceConsumer, waitForWrite } from '../src/core/persistence/service.ts';
 import { embedStaleImages, runEmbedStaleImagesCli } from '../src/core/embed-stale-images.ts';
 import { importImageFile } from '../src/core/import-file.ts';
+import { embedCostCap } from '../src/core/embed-cost-cap.ts';
 import { runEmbed } from '../src/commands/embed.ts';
 import { __setEmbedTransportForTests, configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
@@ -105,6 +106,75 @@ afterAll(async () => {
 });
 
 describe('#6529 embed --stale --images on a managed brain', () => {
+  test('a foreground cost cap refuses before durable image admission', async () =>
+    withEnv(env, async () => {
+      for (const engine of engines) {
+        const { sourceId } = await managedSource(engine, { 'a.png': PNG }, ['a.png']);
+        const before = await engine.executeRaw('SELECT request_id FROM persistence_requests WHERE source_id=$1', [sourceId]);
+        const calls = providerCalls;
+        await expect(embedStaleImages(engine, { sourceId, dryRun: false, costCap: { signal: new AbortController().signal, hit: () => null, metered: fn => fn() } }))
+          .rejects.toThrow('managed_image_budget_unavailable');
+        expect(await engine.executeRaw('SELECT request_id FROM persistence_requests WHERE source_id=$1', [sourceId])).toEqual(before);
+        expect(providerCalls).toBe(calls);
+        expect((await embedStaleImages(engine, { sourceId, dryRun: true, costCap: embedCostCap(0.025, 'user') })).candidates).toBe(1);
+      }
+    }), 120_000);
+  test('a durable cap is bound to the owner request and actual provider usage', async () =>
+    withEnv(env, async () => {
+      for (const engine of engines) {
+        configureGateway({ embedding_model: 'openai:text-embedding-3-small', embedding_multimodal_model: 'voyage:voyage-multimodal-3', embedding_dimensions: 1536,
+          embed_image_max_request_tokens: 9000, embed_image_max_pixels: 4000000, env: { OPENAI_API_KEY: 'test-key', VOYAGE_API_KEY: 'test-key' } });
+        const { sourceId, root } = await managedSource(engine, { 'a.png': PNG }, ['a.png']);
+        const cap = embedCostCap(0.025, 'user')!;
+        const outcome = await embedStaleImages(engine, { sourceId, dryRun: false, costCap: cap });
+        if (process.platform !== 'darwin') { expect(outcome.rebuilt).toBe(0); expect(outcome.failures).toBe(1); expect(providerCalls).toBe(0); continue; }
+        expect(outcome.rebuilt).toBe(1);
+        const rows = await engine.executeRaw<{ protocol_version: number; spend_authorization_id: string }>('SELECT protocol_version,spend_authorization_id FROM persistence_requests WHERE source_id=$1', [sourceId]);
+        expect(rows).toHaveLength(1); expect(rows[0]!.protocol_version).toBe(3);
+        const [auth] = await engine.executeRaw<{ cap: string }>('SELECT cap_cents::text AS cap FROM persistence_spend_authorizations WHERE id=$1::uuid', [rows[0]!.spend_authorization_id]);
+        expect(Number(auth!.cap)).toBe(2.5);
+        const holds = await engine.executeRaw<{ status: string }>('SELECT status FROM mcp_spend_reservations WHERE budget_key=$1', [`image-cap:${rows[0]!.spend_authorization_id}`]);
+        expect(holds).toHaveLength(1); expect(holds[0]!.status).toBe('settled');
+        expect(outcome.authorization_id).toBe(rows[0]!.spend_authorization_id);
+        expect(outcome.cap_usd).toBe(0.025);
+        expect(await engine.executeRaw("SELECT kind FROM persistence_effects WHERE source_id=$1 AND kind IN ('embedding','facts-backstop')", [sourceId])).toHaveLength(0);
+        const { resumeImageSpend } = await import('../src/core/persistence/image-spend.ts');
+        const resumed = await resumeImageSpend(engine, outcome.authorization_id!, [{ sourceId, slug: 'a.png' }]);
+        expect(resumed.id).toBe(outcome.authorization_id!); expect(resumed.capUsd).toBe(0.025);
+        await expect(resumeImageSpend(engine, resumed.id, [{ sourceId, slug: 'not-approved.png' }])).rejects.toThrow('original image scope');
+        await expect(engine.executeRaw('UPDATE persistence_spend_authorizations SET cap_cents=3 WHERE id=$1::uuid', [resumed.id])).rejects.toThrow('immutable');
+        writeFileSync(join(root, 'later.png'), PNG);
+        const { importManagedFile } = await import('../src/core/persistence/import-mutations.ts');
+        await importManagedFile(engine, join(root, 'later.png'), 'later.png', { sourceId, noEmbed: true });
+        const callsBeforeResume = providerCalls;
+        const resumedSweep = await embedStaleImages(engine, { sourceId, dryRun: false, costCap: embedCostCap(0.025, 'user', undefined, resumed.id) });
+        expect(resumedSweep).toMatchObject({ candidates: 0, excluded_from_authorization: 1, authorization_id: resumed.id, cap_usd: 0.025, unresolved_usd: 0 });
+        expect(resumedSweep.spent_usd).toBe(outcome.spent_usd); expect(providerCalls).toBe(callsBeforeResume);
+        await engine.executeRaw('UPDATE persistence_spend_authorizations SET revoked=true WHERE id=$1::uuid', [resumed.id]);
+        await expect(resumeImageSpend(engine, resumed.id)).rejects.toThrow('revoked');
+      }
+    }), 120_000);
+  test.skipIf(process.platform !== 'darwin')('a real 30-second pending receipt stops the sweep after one durable admission', async () =>
+    withEnv(env, async () => {
+      for (const engine of engines) {
+        configureGateway({ embedding_model: 'openai:text-embedding-3-small', embedding_multimodal_model: 'voyage:voyage-multimodal-3', embedding_dimensions: 1536,
+          embed_image_max_request_tokens: 9000, embed_image_max_pixels: 4000000, env: { OPENAI_API_KEY: 'test-key', VOYAGE_API_KEY: 'test-key' } });
+        const { sourceId } = await managedSource(engine, { 'pending.png': PNG, 'later.png': PNG }, ['pending.png', 'later.png']);
+        let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+        const transport = globalThis.fetch;
+        globalThis.fetch = (async (...args: Parameters<typeof fetch>) => { await gate; return transport(...args); }) as typeof fetch;
+        let outcome;
+        try {
+          outcome = await embedStaleImages(engine, { sourceId, dryRun: false, costCap: embedCostCap(0.025, 'user') });
+          expect(outcome).toMatchObject({ reason: 'write_pending', rebuilt: 0, skipped: 0, failures: 1, deferred: 1 });
+          expect(outcome.pending_request_id).toBeDefined();
+          expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [sourceId])).toHaveLength(1);
+          expect(outcome.unresolved_usd).toBeGreaterThan(0);
+        } finally { release(); globalThis.fetch = transport; }
+        const [row] = await engine.executeRaw<import('../src/core/persistence/model.ts').WriteRequest>('SELECT * FROM persistence_requests WHERE request_id=$1::uuid', [outcome!.pending_request_id]);
+        expect((await waitForWrite(engine, row!, { engine: engine.kind }, 10_000)).state).toBe('committed');
+      }
+    }), 120_000);
   test('managed Voyage 429 records one failure and defers the remaining images without retrying', async () =>
     withEnv(env, async () => {
       for (const engine of engines) {

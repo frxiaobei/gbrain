@@ -72,7 +72,8 @@ export interface WriteRequest {
   request_id: string;
   operation: string;
   target_kind?: 'page' | 'skill_bundle';
-  protocol_version?: 1 | 2;
+  protocol_version?: 1 | 2 | 3;
+  spend_authorization_id?: string | null;
   source_id: string;
   source_incarnation: string;
   page_id: number | null;

@@ -80,6 +80,7 @@ const ROWS: readonly Row[] = [
   ['fact_withdrawals', 'out_of_scope', 'text_free_ledger', 'source_id visibility subject fact_hash'],
   ['facts', 'swept', 'fact', 'source_id entity_slug fact kind visibility notability context source source_session embedding source_markdown_slug claim_metric claim_unit claim_period event_type dimension value value_hash dim_status embedding_model embedded_text_hash write_principal_kind write_principal_id last_write_principal_kind last_write_principal_id attributed_to trust_tier write_origin'],
   ['files', 'swept', 'page_files', 'source_id page_slug filename storage_path mime_type content_hash metadata'],
+  ['gbrain_fork_migrations', 'out_of_scope', 'no_memory_text', 'id ddl_sha256'],
   ['gbrain_cycle_locks', 'out_of_scope', 'no_memory_text', 'id holder_host'],
   ['ingest_log', 'out_of_scope', 'probed_reported', 'source_id source_type source_ref pages_updated summary writer_version', 'summary pages_updated'],
   ['link_edge_proposals', 'out_of_scope', 'probed_reported', 'source_id link_type evidence_hash status model generated_line detail', 'generated_line detail'],
@@ -130,6 +131,8 @@ const ROWS: readonly Row[] = [
   ['persistence_host_bindings', 'out_of_scope', 'no_memory_text', 'local_path coordination_path git_durability'],
   ['persistence_local_writers', 'out_of_scope', 'secret_material', 'lane credential_hash grant_ceiling'],
   ['persistence_requests', 'swept', 'request_intent', 'principal_kind principal_id operation source_id slug digest intent authority state recovery outcome error_code error_message blocked_reason target_kind admitter_version consumer_version error_detail claim_phase client_request_id'],
+  // Immutable approval locators remain accountable and matching residuals are disclosed.
+  ['persistence_spend_authorizations', 'out_of_scope', 'probed_reported', 'principal_kind principal_id scope models', 'scope'],
   ['persistence_source_bindings', 'out_of_scope', 'no_memory_text', 'source_id relative_path'],
   ['persistence_topology_changes', 'out_of_scope', 'probed_reported', 'digest operation source_id state recovery outcome', 'recovery outcome'],
   ['persistence_worktree_refreshes', 'out_of_scope', 'probed_reported', 'source_ids state old_head target_head upstream_ref preserved_uncommitted outcome', 'outcome'],

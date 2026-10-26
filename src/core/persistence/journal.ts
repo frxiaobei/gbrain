@@ -44,7 +44,8 @@ export interface WriteAdmission {
   principal: Principal;
   operation: string;
   targetKind?: 'page' | 'skill_bundle';
-  protocolVersion?: 1 | 2;
+  protocolVersion?: 1 | 2 | 3;
+  spendAuthorizationId?: string;
   sourceId: string;
   sourceIncarnation: string;
   slug: string;
@@ -321,12 +322,12 @@ async function prepareAdmission(engine: BrainEngine, input: WriteAdmission, over
       INSERT INTO persistence_requests
       (principal_kind,principal_id,request_id,operation,source_id,source_incarnation,page_id,slug,
        worktree_id,topology_generation,digest,intent,authority,intent_bytes,terminal_reservation,target_kind,protocol_version,
-       admitter_version,admitter_host_id,client_request_id,admitter_segment_reader)
-      VALUES($1,$2,$3::uuid,$4,$5,$6::uuid,$7,$8,$9::uuid,$10,$11,$12::text::jsonb,$13::text::jsonb,$14,$15,$16,$17,$18,$19::uuid,$21,true)
+       admitter_version,admitter_host_id,client_request_id,admitter_segment_reader,spend_authorization_id)
+      VALUES($1,$2,$3::uuid,$4,$5,$6::uuid,$7,$8,$9::uuid,$10,$11,$12::text::jsonb,$13::text::jsonb,$14,$15,$16,$17,$18,$19::uuid,$21,true,$22::uuid)
       RETURNING *`, [input.principal.kind, input.principal.id, requestId, input.operation, input.sourceId,
       input.sourceIncarnation, input.pageId ?? null, input.slug, input.worktreeId ?? null, input.topologyGeneration ?? null,
       fingerprint, JSON.stringify(input.intent), JSON.stringify(input.authority), bytes, terminalBytes, input.targetKind ?? 'page', input.protocolVersion ?? 1,
-      stamp.version, stamp.hostId, counters.map(c => c.key), input.clientRequestId ?? null]);
+      stamp.version, stamp.hostId, counters.map(c => c.key), input.clientRequestId ?? null, input.spendAuthorizationId ?? null]);
     return row;
   } };
 }
@@ -429,7 +430,8 @@ export async function admitWriteGroupInTransaction(tx: BrainEngine, inputs: Writ
  * batch id of a managed file import (`intent.import_batch`). Null when it
  * publishes alone.
  */
-export function publicationGroupKey(row: Pick<WriteRequest, 'operation' | 'intent'>): string | null {
+export function publicationGroupKey(row: Pick<WriteRequest, 'operation' | 'intent' | 'protocol_version'>): string | null {
+  if (row.protocol_version === 3) return null;
   if (typeof row.intent?.group === 'string') return `sync:${row.intent.group}`;
   if (row.operation !== 'put_page') return null;
   if (row.intent?.kind === 'managed_file_import') return typeof row.intent.import_batch === 'string' ? `import:${row.intent.import_batch}` : null;

@@ -63,7 +63,7 @@ import { disposePersistenceConsumer } from '../../src/core/persistence/service.t
 // initSchema time by PGLITE_SCHEMA_SQL; TRUNCATEing the table breaks
 // page_generation_counter.test.ts AND any test that reads the clock value
 // after a reset. Production never truncates the clock table.
-const PRESERVE_TABLES = new Set(['schema_version', 'page_generation_clock', 'persistence_brain']);
+const PRESERVE_TABLES = new Set(['schema_version', 'page_generation_clock', 'persistence_brain', 'gbrain_fork_migrations']);
 
 // Conditions (over plpgsql variables `tables regclass[]` and `storage_bytes`)
 // under which a replica-role DELETE of `tables` would not match TRUNCATE:

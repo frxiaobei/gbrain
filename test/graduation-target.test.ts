@@ -159,6 +159,19 @@ describe.skipIf(!databaseUrl)('Postgres probes and the route cross-check', () =>
       const seeded = await probeTarget(routes);
       expect(seeded).toMatchObject({ empty: true, gbrainSchema: true, nonEmptyTables: [] });
       expect(seeded.embeddingColumns.map(c => `${c.relation}.${c.column}`)).toEqual(expect.arrayContaining(['content_chunks.embedding', 'facts.embedding']));
+      const ledger = await engine.executeRaw('SELECT * FROM gbrain_fork_migrations');
+      await engine.executeRaw("INSERT INTO gbrain_fork_migrations(id,version,ddl_sha256) VALUES('unknown-fixture',1,'unknown')");
+      expect((await probeTarget(routes)).nonEmptyTables).toContain('gbrain_fork_migrations');
+      await engine.executeRaw("DELETE FROM gbrain_fork_migrations WHERE id='unknown-fixture'");
+      await engine.runMigration(0, "CREATE OR REPLACE FUNCTION gbrain_guard_request_protocol() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$");
+      expect((await probeTarget(routes)).nonEmptyTables).toContain('gbrain_fork_migrations');
+      expect(await engine.executeRaw('SELECT * FROM gbrain_fork_migrations')).toEqual(ledger);
+      await engine.initSchema();
+      expect((await probeTarget(routes)).empty).toBe(true);
+      await engine.executeRaw(`INSERT INTO persistence_spend_authorizations(id,principal_kind,principal_id,cap_cents,scope,models)
+        VALUES('00000000-0000-4000-8000-000000000001','local_cli','fixture',2.5,'[{"sourceId":"default","slug":"fixture.png"}]','["voyage:voyage-multimodal-3"]')`);
+      expect((await probeTarget(routes)).nonEmptyTables).toContain('persistence_spend_authorizations');
+      await engine.executeRaw('TRUNCATE persistence_spend_authorizations CASCADE');
       await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('notes', 'Notes')");
       await engine.executeRaw("UPDATE persistence_brain SET enabled = true");
       const used = await probeTarget(routes);

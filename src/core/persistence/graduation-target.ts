@@ -15,6 +15,7 @@
  * automatic session-pooler fallback for this operation.
  */
 import postgres from '#postgres';
+import { installedForkLedgerOnly } from '../fork-migrations/status.ts';
 import { createHash, randomInt } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { PostgresEngine } from '../postgres-engine.ts';
@@ -123,6 +124,7 @@ export async function targetEmptiness(query: Query): Promise<{ empty: boolean; n
   const nonEmptyTables: string[] = [];
   for (const table of tables) {
     if (SCHEMA_OWNED_TABLES.has(table.name)) continue;
+    if (table.name === 'gbrain_fork_migrations' && await installedForkLedgerOnly({ executeRaw: query })) continue;
     const limit = SEED_ROW_LIMITS[table.name] ?? 0;
     const [row] = await query<{ n: number }>(`SELECT count(*)::int AS n FROM (SELECT 1 FROM ${table.ident} LIMIT ${limit + 1}) s`);
     if (Number(row?.n ?? 0) > limit) { nonEmptyTables.push(table.name); continue; }

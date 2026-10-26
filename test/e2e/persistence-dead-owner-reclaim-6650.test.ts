@@ -118,7 +118,11 @@ describe.skipIf(!hasDatabase() || !linux)('a claim held by a provably dead owner
       await consumer.tick();
       const orphan = await admitWrite(engine, admission(config, sources[0]!, 'dead-a/idle', 'idle consumer body'));
       await stageClaim(engine, orphan.id, { pid: deadPid(), start: '1' });
-      await Bun.sleep(DEAD_OWNER_SCAN_MS);
+      // The consumer gates scans with wall time. A VM clock correction can make a
+      // monotonic 5s sleep finish before Date.now reaches that gate.
+      const scanAt = (consumer as unknown as { deadOwnerScanAt: number }).deadOwnerScanAt;
+      await waitFor(() => Date.now() - scanAt >= DEAD_OWNER_SCAN_MS,
+        { timeoutMs: DEAD_OWNER_SCAN_MS * 2, label: 'the actual dead-owner scan clock reaches its threshold' });
       await consumer.tick();
       await waitFor(async () => (await getWriteRequestById(engine, orphan.id))?.state === 'committed', { timeoutMs: 20_000, label: 'the idle consumer reclaims and commits it' });
     } finally { await consumer.stop(); }

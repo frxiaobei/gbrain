@@ -28,6 +28,7 @@ import { imageVariantSignature } from './ai/multimodal-input.ts';
 
 import { execFileSync } from './spawn.ts';
 import type { BrainEngine } from './engine.ts';
+import { OperationError } from './ops/contract.ts';
 import { importImageFile } from './import-file.ts';
 import { resolveRecordedImageFile, type DirectoryListings, type RecordedImageFile } from './image-asset-resolver.ts';
 import { importManagedFile } from './persistence/import-mutations.ts';
@@ -67,6 +68,11 @@ export interface StaleImageSweepResult extends EmbedCostStopFields {
   /** Candidates not attempted because the sweep stopped early. */
   deferred: number;
   rate_limited: boolean;
+  /** Accepted durable work still owned by the coordinator; never counted unchanged. */
+  pending_request_id?: string;
+  authorization_id?: string;
+  unresolved_usd?: number;
+  excluded_from_authorization?: number;
   failure_samples: string[];
   /** Up to 5 `source:slug: no file at <path tried>` lines for the candidates without a source file. */
   missing_samples: string[];
@@ -93,8 +99,8 @@ export async function embedStaleImages(
           OR NOT (${safeChunksFilter('p')})
           OR NOT EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id = p.id AND c.embedding_image IS NOT NULL)
           OR ($1 AND COALESCE(p.frontmatter->>'ocr_status', '') <> 'done' AND btrim(p.compiled_truth) = ''))`;
-  const rows = await engine.executeRaw<{ slug: string; source_id: string; source_path: string | null; local_path: string | null }>(
-    `SELECT p.slug, p.source_id, p.source_path, s.local_path ${scope}
+  let rows = await engine.executeRaw<{ slug: string; source_id: string; source_path: string | null; local_path: string | null; unsealed: boolean; chunker_version: number }>(
+    `SELECT p.slug, p.source_id, p.source_path, s.local_path, (${unsealed}) AS unsealed,p.chunker_version ${scope}
         AND CASE WHEN ${unsealed} THEN k.cls = 'reimport' ELSE ${incompleteSealed} END
       ORDER BY p.id`, params);
   const [counts] = await engine.executeRaw<Record<'reimport' | 'incomplete_sealed' | 'ocr_required' | 'sealable' | 'protected' | 'archived', number>>(
@@ -118,6 +124,23 @@ export async function embedStaleImages(
   const gitRoots = new Map<string, string | null>();
   const listings: DirectoryListings = new Map();
   const cap = opts.costCap;
+  // A foreground tracker cannot cross the durable owner's process boundary.
+  // Refuse before the first admission until an owner-enforced durable cap is attached.
+  if (managed && cap && rows.length > 0 && !cap.managedAuthorization) {
+    throw new Error('managed_image_budget_unavailable: this image sweep cannot carry its approved cost cap to the durable owner; nothing was queued. Keep the cap and do not retry through an uncapped import.');
+  }
+  const spendAuthorization = managed && cap && (rows.length || cap.resuming) ? await cap.managedAuthorization!(engine, rows.map(row => ({ sourceId: row.source_id, slug: row.slug }))) : undefined;
+  if (spendAuthorization && cap?.resuming) {
+    const originalCount = rows.length;
+    const allowed = new Set(spendAuthorization.scope.map(t => JSON.stringify([t.sourceId, t.slug])));
+    rows = rows.filter(row => allowed.has(JSON.stringify([row.source_id, row.slug])));
+    result.excluded_from_authorization = originalCount - rows.length;
+    result.candidates = rows.length;
+    result.missingSourcePath = rows.filter(row => row.source_path === null).length;
+    result.reimport = rows.filter(row => row.unsealed).length;
+    result.incomplete_sealed = rows.filter(row => !row.unsealed).length;
+  }
+  if (spendAuthorization) serr(`[embed] durable authorization ${spendAuthorization.id}, lifetime cap $${spendAuthorization.capUsd}; retain this ID if interrupted. Resume only with --resume-spend ${spendAuthorization.id}.`);
   for (let index = 0; index < rows.length; index++) {
     const row = rows[index]!;
     const defer = () => { result.deferred = rows.length - index; };
@@ -140,8 +163,8 @@ export async function embedStaleImages(
     if (managed && located.viaGitRoot) { fail(row, `${file} is outside source ${row.source_id}'s root ${root}; a managed brain imports only files inside the source root`); continue; }
     if (cap?.hit()) { defer(); break; }
     try {
-      const run = () => managed ? importManagedFile(engine, file, sourcePath, { sourceId: row.source_id, signal: cap?.signal }) : importImageFile(engine, file, sourcePath, { sourceId: row.source_id, signal: cap?.signal });
-      const imported = cap ? await cap.metered(run) : await run();
+      const run = () => managed ? importManagedFile(engine, file, sourcePath, { sourceId: row.source_id, signal: cap?.signal, spendAuthorization }) : importImageFile(engine, file, sourcePath, { sourceId: row.source_id, signal: cap?.signal });
+      const imported = cap && !managed ? await cap.metered(run) : await run();
       if (imported.status === 'imported') result.rebuilt++;
       else if (cap?.hit()) { defer(); break; }
       else if (imported.status === 'error') {
@@ -158,6 +181,13 @@ export async function embedStaleImages(
       if (cap?.hit()) { defer(); break; }
       const message = e instanceof Error ? e.message : String(e);
       fail(row, message);
+      if (e instanceof OperationError && e.code === 'write_pending') {
+        result.reason = 'write_pending';
+        result.pending_request_id = e.writeRequest?.request_id;
+        result.deferred = rows.length - index - 1;
+        break;
+      }
+      if (message.includes('paid_import_budget:')) { result.deferred = rows.length - index - 1; break; }
       if (/Voyage multimodal returned 429:/.test(message)) {
         result.rate_limited = true;
         result.deferred = rows.length - index - 1;
@@ -165,6 +195,8 @@ export async function embedStaleImages(
       }
     }
   }
+  const totals = await cap?.durableTotals?.();
+  if (totals) Object.assign(result, totals, { resume_command: `gbrain embed --stale --images --resume-spend ${totals.authorization_id}${opts.sourceId ? ` --source ${JSON.stringify(opts.sourceId)}` : ''}` });
   return result;
 }
 
@@ -223,6 +255,7 @@ export async function runEmbedStaleImagesCli(engine: BrainEngine, args: string[]
     console.log(`[embed] images: ${result.ocr_required} ${dryRun ? 'would be refused until OCR is enabled' : 'refused for lack of a successful fresh OCR pass'} (ocr_required; GBRAIN_EMBEDDING_IMAGE_OCR=true), `
       + `${result.sealable} sealable (not candidates: gbrain projections drain seals them keyless), ${result.protected} protected and ${result.archived} archived (not candidates, by design)`);
   }
+  if (result.authorization_id) serr(`[embed] authorization ${result.authorization_id}: cap $${result.cap_usd}, spent $${result.spent_usd}, unresolved $${result.unresolved_usd}; same remaining authorization: ${result.resume_command}`);
   if (result.missing_samples.length) serr(`[embed] first missing image file: ${result.missing_samples[0]}`);
   if (result.failures > 0) serr(`[embed] first image failure: ${result.failure_samples[0]}`);
   if (capped) (args.includes('--json') ? serr : console.log)(embedCostStopVerdict(result, capped));

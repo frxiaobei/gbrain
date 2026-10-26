@@ -25,6 +25,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
+import { readForkExtensionStatus } from '../src/core/fork-migrations/status.ts';
+import { imageSpendTotals } from '../src/core/persistence/image-spend.ts';
+import { seedImageSpendGraduation } from './helpers/image-spend-graduation.ts';
 import { declarePersistenceProtocol } from '../src/core/persistence/protocol.ts';
 import type { TableReceipt } from '../src/core/persistence/engine-graduation.types.ts';
 import { copyOrder, GRADUATION_INVENTORY } from '../src/core/persistence/graduation-inventory.ts';
@@ -35,6 +38,7 @@ import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const RUN_ID = randomUUID();
+const IMAGE_AUTH = randomUUID(), IMAGE_REQUEST = randomUUID();
 const home = mkdtempSync(join(tmpdir(), 'gbrain-graduation-verify-'));
 let source: PGLiteEngine;
 let liteTarget: PGLiteEngine;
@@ -134,6 +138,7 @@ beforeAll(async () => {
   await source.executeRaw(`UPDATE content_chunks SET embedding = (SELECT array_agg(sin(g * id)::real)::vector FROM generate_series(1, $1::int) g)
     WHERE id IN (SELECT id FROM content_chunks ORDER BY id LIMIT 3)`, [dims!.n]);
   await source.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+  await seedImageSpendGraduation(source, fixture.queuedRequestId, IMAGE_AUTH, IMAGE_REQUEST);
   receipts = [];
   for (const entry of await copyOrder(source)) receipts.push(await digestTable(source, entry, { applyTransforms: true }));
 
@@ -153,6 +158,22 @@ afterAll(async () => {
 });
 
 describe('verifyGraduation', () => {
+  test('graduation carries exact paid-image authority, settled/unresolved spend and request binding, but independently verifies target DDL', async () => {
+    const [original] = await source.executeRaw('SELECT * FROM persistence_spend_authorizations WHERE id=$1::uuid', [IMAGE_AUTH]);
+    for (const { engine } of targets) {
+      expect((await engine.executeRaw('SELECT * FROM persistence_spend_authorizations WHERE id=$1::uuid', [IMAGE_AUTH]))[0]).toEqual(original);
+      expect(await imageSpendTotals(engine, IMAGE_AUTH)).toEqual({ spent_usd: .0005, unresolved_usd: .002 });
+      const [request] = await engine.executeRaw('SELECT protocol_version,spend_authorization_id FROM persistence_requests WHERE id=$1::uuid', [IMAGE_REQUEST]);
+      expect(request).toEqual({ protocol_version: 3, spend_authorization_id: IMAGE_AUTH });
+      expect((await readForkExtensionStatus(engine))[0]!.state).toBe('applied');
+      expect((await engine.executeRaw<{ own: boolean }>("SELECT verified_at>'2000-01-02'::timestamptz AS own FROM gbrain_fork_migrations"))[0]!.own).toBe(true);
+      await expect(engine.transaction(async tx => {
+        await tx.executeRaw("SELECT set_config('gbrain.graduation_run',$1,true),set_config('gbrain.persistence_protocol','2',true),set_config('gbrain.paid_import_protocol','',true)", [RUN_ID]);
+        await tx.executeRaw("UPDATE persistence_requests SET state='running' WHERE id=$1::uuid", [IMAGE_REQUEST]);
+      })).rejects.toThrow('upgraded owner required');
+    }
+  });
+
   test('a faithful, fenced copy of a brain with history verifies green, with transforms applied to the source side', async () => {
     for (const { name, engine } of targets) {
       const [before] = await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM persistence_requests');

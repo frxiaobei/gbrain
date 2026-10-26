@@ -27,6 +27,8 @@ import { prepareMultimodalBatch, multimodalRequestBody, multimodalRequestLimits 
 import type { embedMany, generateObject, generateText, JSONSchema7, Output } from 'ai';
 import { jsonSchema } from '@ai-sdk/provider-utils';
 import { installAiSdkWarningWriter } from './sdk-warnings.ts';
+import { getCurrentBudgetTracker, withBudgetTracker } from '../budget/context.ts';
+export { getCurrentBudgetTracker, withBudgetTracker } from '../budget/context.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { listRecipes } from './recipes/index.ts';
@@ -1618,7 +1620,7 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   // global default. resolveEmbeddingProvider validates the override at the
   // recipe layer — bad model strings throw AIConfigError with a clear hint.
   const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
-  const tracker = __budgetStore.getStore() ?? null;
+  const tracker = getCurrentBudgetTracker();
   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
   const truncated = truncateEmbedInputs(texts);
 
@@ -1910,7 +1912,7 @@ export async function embedMultimodal(
   // as embed() does. An image is reserved at the provider's per-input maximum
   // (MULTIMODAL_IMAGE_TOKEN_CEILING) and settled at the provider's reported
   // tokens when it reports them, so a cap is never crossed by an estimate.
-  const tracker = __budgetStore.getStore() ?? null;
+  const tracker = getCurrentBudgetTracker();
   if (!tracker) return embedMultimodalUnmetered(inputs, opts);
   const modelStr = requireConfig().embedding_multimodal_model ?? getEmbeddingModel();
   const { parsed, recipe } = resolveRecipe(modelStr);
@@ -2019,7 +2021,7 @@ async function embedMultimodalUnmetered(
 
     let res: Response;
     try {
-      res = await withMultimodalPermit(cfg.embed_image_min_interval_ms ?? 0, AI_MULTIMODAL_TIMEOUT_MS, opts.signal, () => invokeAI({ operation: 'gateway.multimodal', kind: 'multimodal', model: `${recipe.id}:${parsed.modelId}` }, () => {
+      res = await withMultimodalPermit(cfg.embed_image_min_interval_ms ?? 0, AI_MULTIMODAL_TIMEOUT_MS, opts.signal, () => invokeAI({ operation: 'gateway.multimodal', kind: 'multimodal', model: `${recipe.id}:${parsed.modelId}`, ...(tokenCap ? { maxInputTokens: tokenCap, maxOutputTokens: 0 } : {}) }, () => {
         opts.signal?.throwIfAborted();
         usage.sent = (usage.sent ?? 0) + 1;
         return fetch(`${baseUrl}/multimodalembeddings`, {
@@ -2770,16 +2772,6 @@ export async function generateOcrText(imageBytes: Buffer, mime: string): Promise
 // IMPORTANT (A1): for the subagent path, reserve() runs implicitly via the
 // gateway BEFORE acquireLease() in src/core/minions/handlers/subagent.ts —
 // budget throw → no lease attempted, no rate-lease window held.
-
-const __budgetStore = new AsyncLocalStorage<BudgetTracker>();
-
-export function withBudgetTracker<T>(tracker: BudgetTracker, fn: () => Promise<T>): Promise<T> {
-  return __budgetStore.run(tracker, fn);
-}
-
-export function getCurrentBudgetTracker(): BudgetTracker | null {
-  return __budgetStore.getStore() ?? null;
-}
 
 // ---- Chat (commit 1) ----
 
@@ -3542,7 +3534,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
   await discoverBeforeOpenAICall(opts.model ?? _config?.chat_model);
   const fallbackChain = opts.allowFallback === false ? undefined : _config?.chat_fallback_chain;
   if (fallbackChain?.length) return chatWithFallback(opts, opts.model ?? getChatModel(), fallbackChain, chat, { onRefusal: _config?.chat_fallback_on_refusal !== false });
-  const tracker = __budgetStore.getStore() ?? null;
+  const tracker = getCurrentBudgetTracker();
   const modelStrEarly = opts.model ?? getChatModel();
 
   // Guardrail seam: classify ONLY the latest user message before provider
@@ -4318,7 +4310,7 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
     getRerankerModel() ??
     DEFAULT_RERANKER_MODEL;
 
-  const tracker = __budgetStore.getStore() ?? null;
+  const tracker = getCurrentBudgetTracker();
   const { parsed, recipe } = resolveRecipe(modelStr);
   const tp = recipe.touchpoints.reranker;
   if (!tp) {
